@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cottonmouth-real-agent
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: real-agent
+  # When the account allows IAM role creation, prefer IRSA over the
+  # cottonmouth-aws-creds Secret and annotate this SA instead:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/cottonmouth-real-agent-bedrock
+  # (trust + policy JSON live in deploy/aws/).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cottonmouth-real-agent
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: real-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: real-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: cottonmouth
+        app.kubernetes.io/component: real-agent
+    spec:
+      serviceAccountName: cottonmouth-real-agent
+      containers:
+        - name: real-agent
+          # Reuses the backend image (bundles the SDK + examples).
+          image: cottonmouth-backend:latest
+          imagePullPolicy: IfNotPresent
+          # Tool-using Bedrock agent: real file/command/HTTP actions, decision
+          # spans, and permission audit. Runs autonomously AND serves POST /run
+          # so the dashboard can submit tasks on demand.
+          command: ["python", "examples/ops_agent.py"]
+          ports:
+            - name: http
+              containerPort: 8200
+          env:
+            - name: COTTONMOUTH_ENDPOINT
+              value: http://cottonmouth-backend:8150
+            - name: AWS_REGION
+              value: us-east-1
+            - name: BEDROCK_MODEL_ID
+              value: anthropic.claude-3-haiku-20240307-v1:0
+            - name: AGENT_INTERVAL
+              value: "25"
+            - name: AGENT_SERVE
+              value: "1"
+            - name: AGENT_PORT
+              value: "8200"
+            - name: AGENT_WORKSPACE
+              value: /tmp/agent-workspace
+          # Bedrock auth. In this sandbox, IAM role creation is blocked by an
+          # SCP, so the agent uses short-lived credentials from a Secret.
+          # Where IRSA is available, drop this and annotate the ServiceAccount.
+          envFrom:
+            - secretRef:
+                name: cottonmouth-aws-creds
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8200
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cottonmouth-real-agent
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: real-agent
+spec:
+  selector:
+    app.kubernetes.io/component: real-agent
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200

@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cottonmouth
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - backend.yaml
+  - web.yaml
+  - sample-agent.yaml
+  - real-agent.yaml
+  # Enable only when the cluster has the AWS Load Balancer Controller. Left out
+  # for the sandbox deploy (access via `kubectl port-forward`) to avoid leaving
+  # an orphaned ALB behind the cluster's TTL.
+  # - ingress.yaml
+
+# Point these at your ECR repos, then `kubectl apply -k deploy/k8s`.
+# Example (sandbox account):
+#   images:
+#     - name: cottonmouth-backend
+#       newName: <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-backend
+#       newTag: v1
+#     - name: cottonmouth-web
+#       newName: <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-web
+#       newTag: v1
+images:
+  - name: cottonmouth-backend
+    newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-backend
+    newTag: v5
+  - name: cottonmouth-web
+    newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-web
+    newTag: v5

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cottonmouth-config
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+data:
+  # All mutable state lives here (mounted on the PVC).
+  COTTONMOUTH_DATA_DIR: "/data"
+  # Don't re-exec on file changes inside the container.
+  COTTONMOUTH_DISABLE_RELOAD: "1"
+  # Run only the agent-trace watcher (no Slack/GitHub/AWS infra watchers).
+  COTTONMOUTH_WATCHERS: "agent-trace"
+  # Alert thresholds for the trace watcher.
+  AGENT_COST_ALERT_THRESHOLD: "0.30"
+  AGENT_LATENCY_ALERT_MULTIPLIER: "2.0"
+  # Bedrock (Investigate) — only used if the SA has IRSA Bedrock access.
+  AWS_REGION: "us-east-1"
+  BEDROCK_REGION: "us-east-1"
+  BEDROCK_MODEL: "us.anthropic.claude-opus-4-6-v1"

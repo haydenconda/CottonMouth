@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cottonmouth-sample-agent
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: sample-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: sample-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: cottonmouth
+        app.kubernetes.io/component: sample-agent
+    spec:
+      containers:
+        - name: sample-agent
+          # Reuses the backend image; just runs the example instead.
+          image: cottonmouth-backend:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "examples/sample_agent.py"]
+          env:
+            - name: COTTONMOUTH_ENDPOINT
+              value: http://cottonmouth-backend:8150
+            - name: SAMPLE_INTERVAL
+              value: "5"
+            - name: SAMPLE_BURST
+              value: "8"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

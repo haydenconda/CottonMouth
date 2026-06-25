@@ -1,0 +1,30 @@
+# Public entry point for the dashboard via the AWS Load Balancer Controller.
+# The web app proxies /api/* to the backend, so only the web service is exposed.
+#
+# Requires aws-load-balancer-controller in the cluster. If it isn't installed,
+# remove this file from kustomization.yaml and use port-forward instead:
+#   kubectl -n cottonmouth port-forward svc/cottonmouth-web 3000:3000
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cottonmouth-web
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cottonmouth-web
+                port:
+                  number: 3000

@@ -1,0 +1,52 @@
+# Local end-to-end stack: backend + dashboard + a live sample agent.
+#   docker compose up --build
+#   open http://localhost:3000   (dashboard)
+#         http://localhost:8150/api/health   (backend)
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cottonmouth-backend:local
+    environment:
+      COTTONMOUTH_DATA_DIR: /data
+      COTTONMOUTH_DISABLE_RELOAD: "1"
+      COTTONMOUTH_WATCHERS: agent-trace
+      AGENT_COST_ALERT_THRESHOLD: "0.3"
+      # Investigate (Bedrock) is optional; leave unset for the core demo.
+      # AWS_REGION: us-east-1
+      # BEDROCK_REGION: us-east-1
+    ports:
+      - "8150:8150"
+    volumes:
+      - cottonmouth-data:/data
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: self
+        BACKEND_ORIGIN: http://backend:8150
+    image: cottonmouth-web:local
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  sample-agent:
+    image: cottonmouth-backend:local
+    command: ["python", "examples/sample_agent.py"]
+    environment:
+      COTTONMOUTH_ENDPOINT: http://backend:8150
+      SAMPLE_INTERVAL: "5"
+      SAMPLE_BURST: "8"
+    # This service runs the agent, not the API, so the image's API healthcheck
+    # doesn't apply.
+    healthcheck:
+      disable: true
+    depends_on:
+      - backend
+
+volumes:
+  cottonmouth-data:

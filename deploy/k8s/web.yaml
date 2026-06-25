@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cottonmouth-web
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: cottonmouth
+        app.kubernetes.io/component: web
+    spec:
+      containers:
+        - name: web
+          # Build with BACKEND_ORIGIN=http://cottonmouth-backend:8150 (the default) so
+          # the Next server proxies /api/* to the backend Service in-namespace.
+          image: cottonmouth-web:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cottonmouth-web
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: web
+spec:
+  selector:
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

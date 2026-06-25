@@ -1,0 +1,19 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockInvoke",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse",
+        "bedrock:ConverseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/anthropic.*",
+        "arn:aws:bedrock:*:621741996708:inference-profile/*"
+      ]
+    }
+  ]
+}

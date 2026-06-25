@@ -1,0 +1,49 @@
+{
+  "version": "1.0.0",
+  "updated": "2026-06-24",
+  "description": "Single source of truth for agent permissions. The agent enforces these rules at runtime (emitting permission_check spans); the CottonMouth backend serves them to the governance UI. Deny-by-default: anything outside an allow rule is blocked.",
+  "agents": {
+    "ops-assistant": {
+      "display_name": "Ops Assistant",
+      "description": "Tool-using Bedrock agent that reads/writes files, runs shell commands, and fetches URLs inside a sandboxed workspace.",
+      "enforcement": "CottonMouth SDK permission_check spans, evaluated before every tool call",
+      "default_effect": "deny",
+      "tools": [
+        { "name": "read_file", "description": "Read a UTF-8 text file", "effect": "allow", "scope": "workspace only" },
+        { "name": "write_file", "description": "Create or overwrite a text file", "effect": "allow", "scope": "workspace only" },
+        { "name": "run_command", "description": "Run a shell command", "effect": "conditional", "scope": "command allowlist" },
+        { "name": "http_fetch", "description": "HTTP GET a URL", "effect": "conditional", "scope": "host allowlist" }
+      ],
+      "rules": [
+        {
+          "id": "fs-scope",
+          "category": "filesystem",
+          "effect": "allow",
+          "description": "File reads and writes must stay within the sandbox workspace.",
+          "values": ["/tmp/agent-workspace"]
+        },
+        {
+          "id": "cmd-allow",
+          "category": "command",
+          "effect": "allow",
+          "description": "Shell binaries the agent is permitted to execute.",
+          "values": ["ls", "cat", "echo", "pwd", "head", "tail", "wc", "grep", "find", "date", "whoami", "python3", "sort", "uniq"]
+        },
+        {
+          "id": "cmd-deny",
+          "category": "command",
+          "effect": "deny",
+          "description": "Destructive or unpermitted binaries that are always blocked.",
+          "values": ["rm", "sudo", "curl", "wget", "ssh", "nc", "chmod", "chown", "mv", "dd", "kill"]
+        },
+        {
+          "id": "net-allow",
+          "category": "network",
+          "effect": "allow",
+          "description": "Hosts the agent is permitted to make HTTP requests to.",
+          "values": ["example.com", "www.example.com", "api.github.com", "raw.githubusercontent.com"]
+        }
+      ]
+    }
+  }
+}
