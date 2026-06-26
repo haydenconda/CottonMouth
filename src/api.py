@@ -95,12 +95,24 @@ async def cors_middleware(request: web.Request, handler) -> web.StreamResponse:
 # ---------------------------------------------------------------------------
 
 
+# Never read more than this many bytes from the end of an append-only log when
+# serving recent-window reads. Bounds memory/IO regardless of on-disk size so a
+# runaway events.jsonl/traces.jsonl can't OOM the backend or block the event
+# loop long enough for the liveness probe to kill the pod.
+_MAX_TAIL_BYTES = 48 * 1024 * 1024
+
+
 def _read_jsonl(path: Path, limit: int = 0, **filters: str) -> list[dict]:
-    """Read a JSONL file, apply optional field filters, return most-recent-first."""
+    """Read the tail of a JSONL file, apply optional field filters, return
+    most-recent-first.
+
+    Reads at most ``_MAX_TAIL_BYTES`` from the end of the file so peak memory
+    and IO are independent of the file's total size.
+    """
     if not path.exists():
         return []
     records: list[dict] = []
-    for line in path.read_text(encoding="utf-8").strip().split("\n"):
+    for line in _read_tail_lines(path, _MAX_TAIL_BYTES):
         line = line.strip()
         if not line:
             continue
@@ -119,6 +131,25 @@ def _read_jsonl(path: Path, limit: int = 0, **filters: str) -> list[dict]:
     if limit > 0:
         records = records[:limit]
     return records
+
+
+def _read_tail_lines(path: Path, max_bytes: int) -> list[str]:
+    """Return the lines from the last ``max_bytes`` of ``path`` (dropping the
+    partial line at the seek boundary) without reading the whole file."""
+    from collections import deque
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    try:
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                f.readline()  # drop the partial line at the seek boundary
+            tail = deque(f)
+    except OSError:
+        return []
+    return [ln.decode("utf-8", "replace") for ln in tail]
 
 
 def _json_response(data, *, status: int = 200) -> web.Response:
@@ -306,16 +337,48 @@ async def handle_ingest_spans(request: web.Request) -> web.Response:
     lines = "".join(json.dumps(s, ensure_ascii=False, default=str) + "\n" for s in spans)
 
     async with _ingest_lock:
-        await asyncio.to_thread(_append_text, traces_file, lines)
+        await asyncio.to_thread(_append_and_rotate, traces_file, lines)
 
     log.info("Ingested %d span(s) -> %s", len(spans), traces_file.name)
     return _json_response({"accepted": len(spans)}, status=202)
+
+
+# traces.jsonl is append-only and otherwise grows without bound. Once it crosses
+# the size threshold we trim it to the most recent lines so it can never grow
+# back into OOM/liveness territory. The window kept comfortably exceeds the
+# dashboard's read window (_TRACES_WINDOW=12000).
+_TRACES_MAX_BYTES = 40 * 1024 * 1024
+_TRACES_KEEP_LINES = 30000
 
 
 def _append_text(path: Path, text: str) -> None:
     with open(path, "a", encoding="utf-8") as f:
         f.write(text)
         f.flush()
+
+
+def _append_and_rotate(path: Path, text: str) -> None:
+    """Append ``text`` then, if the file has grown past the size cap, atomically
+    rewrite it with only the most recent ``_TRACES_KEEP_LINES`` lines."""
+    _append_text(path, text)
+    try:
+        if path.stat().st_size <= _TRACES_MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        kept = _read_tail_lines(path, _MAX_TAIL_BYTES)[-_TRACES_KEEP_LINES:]
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            for ln in kept:
+                if not ln.endswith("\n"):
+                    ln += "\n"
+                f.write(ln)
+            f.flush()
+        os.replace(tmp, path)
+        log.info("Rotated %s -> kept last %d lines", path.name, len(kept))
+    except OSError:
+        log.exception("Failed to rotate %s", path.name)
 
 
 async def handle_investigate_submit(request: web.Request) -> web.Response:
@@ -398,6 +461,95 @@ async def handle_policies(_: web.Request) -> web.Response:
     return _json_response(load_policies())
 
 
+def _bare_model(m: str) -> str:
+    """Normalize a model id for comparison: drop a provider prefix and trim a
+    Bedrock version suffix so 'claude-3-haiku', 'bedrock/anthropic.claude-3-haiku-...'
+    and 'anthropic.claude-3-haiku-...-v1:0' compare equal on family."""
+    m = (m or "").split("/", 1)[-1]
+    if "." in m:
+        m = m.split(".", 1)[-1]
+    for cut in ("-2024", "-2025", "-v1", "-v2", ":0"):
+        i = m.find(cut)
+        if i != -1:
+            m = m[:i]
+    return m
+
+
+def _models_match(a: str, b: str) -> bool:
+    ba, bb = _bare_model(a), _bare_model(b)
+    return ba == bb or ba.startswith(bb) or bb.startswith(ba)
+
+
+def _observed_gateway_models() -> dict[str, dict]:
+    """Per-agent {models:set, calls:int, cost:float} observed from gateway llm_call
+    spans (source == 'litellm') in the recent trace window."""
+    out: dict[str, dict] = {}
+    for s in _load_traces_file():
+        if s.get("span_type") != "llm_call":
+            continue
+        md = s.get("metadata") or {}
+        if md.get("source") != "litellm":
+            continue
+        agent = s.get("agent_name", "") or "unknown"
+        rec = out.setdefault(agent, {"models": set(), "calls": 0, "cost": 0.0})
+        if s.get("model"):
+            rec["models"].add(s["model"])
+        rec["calls"] += 1
+        rec["cost"] += float(s.get("cost_usd") or 0.0)
+    return out
+
+
+async def handle_gateway(_: web.Request) -> web.Response:
+    """GET /api/gateway -- reconcile each agent's DECLARED gateway model access
+    (policy-as-data) against what the gateway actually EXPOSES (/v1/models) and
+    what the agent has actually USED (observed llm_call spans). The gateway
+    enforces; CottonMouth surfaces the envelope and flags drift.
+    """
+    from src.common.gateway_client import snapshot
+
+    # snapshot() makes synchronous HTTP calls to the gateway and
+    # _observed_gateway_models() scans the trace tail — run both off the event
+    # loop so the gateway being slow can't block the loop / liveness probe.
+    snap, observed = await asyncio.gather(
+        asyncio.to_thread(snapshot),
+        asyncio.to_thread(_observed_gateway_models),
+    )
+    policies = load_policies()
+    available = snap.get("models", [])
+
+    agents = []
+    for name, ap in (policies.get("agents", {}) or {}).items():
+        gw = ap.get("gateway")
+        obs = observed.get(name)
+        if not gw and not obs:
+            continue  # not a gateway-using agent
+        declared = list((gw or {}).get("declared_models", []))
+        obs_models = sorted((obs or {}).get("models", set()))
+        # Drift: declared a model the gateway doesn't expose; or used a model that
+        # wasn't declared.
+        not_exposed = [m for m in declared if available and not any(_models_match(m, a) for a in available)]
+        undeclared_used = [m for m in obs_models if declared and not any(_models_match(m, d) for d in declared)]
+        agents.append({
+            "agent_name": name,
+            "display_name": ap.get("display_name", name),
+            "key_alias": (gw or {}).get("key_alias", ""),
+            "declared_models": declared,
+            "observed_models": obs_models,
+            "observed_calls": (obs or {}).get("calls", 0),
+            "observed_cost_usd": round((obs or {}).get("cost", 0.0), 6),
+            "drift": {"declared_not_exposed": not_exposed, "used_not_declared": undeclared_used},
+        })
+
+    return _json_response({
+        "enabled": snap.get("enabled", False),
+        "reachable": snap.get("reachable", False),
+        "endpoint": snap.get("endpoint", ""),
+        "db_backed": snap.get("db_backed", False),
+        "available_models": available,
+        "agents": agents,
+    })
+
+
 async def handle_permissions(request: web.Request) -> web.Response:
     """GET /api/permissions -- live audit aggregated from permission_check spans.
 
@@ -410,8 +562,10 @@ async def handle_permissions(request: web.Request) -> web.Response:
     except ValueError:
         limit = 25
 
-    spans = _read_jsonl(_traces_file())  # most-recent-first
-    checks = [s for s in spans if s.get("span_type") == "permission_check"]
+    # Use the bounded, cached trace loader (tail-only) off the event loop so a
+    # large traces.jsonl can't block the loop / trip the liveness probe.
+    spans = await asyncio.to_thread(_load_traces_file)  # oldest-first
+    checks = [s for s in reversed(spans) if s.get("span_type") == "permission_check"]
 
     allowed = denied = 0
     by_agent: dict[str, dict[str, int]] = {}
@@ -513,6 +667,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/investigate/{query_id}", handle_investigate_poll)
     app.router.add_post("/api/agent/run", handle_agent_run)
     app.router.add_get("/api/policies", handle_policies)
+    app.router.add_get("/api/gateway", handle_gateway)
     app.router.add_get("/api/permissions", handle_permissions)
 
     log.info("CottonMouth API routes registered")

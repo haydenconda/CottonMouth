@@ -5,8 +5,12 @@ import Link from "next/link";
 import {
   fetchPolicies,
   fetchPermissionAudit,
+  fetchGateway,
   type PolicyDoc,
   type AgentPolicy,
+  type GatewayPolicy,
+  type GatewayReconcile,
+  type GatewayAgentReconcile,
   type PermissionAudit,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
@@ -18,6 +22,8 @@ import {
   Globe,
   Wrench,
   ShieldAlert,
+  Cpu,
+  AlertTriangle,
 } from "lucide-react";
 
 const CATEGORY_META: Record<
@@ -43,13 +49,90 @@ function ToolBadge({ effect }: { effect: string }) {
   );
 }
 
+function GatewayAccessSection({ gw }: { gw: GatewayAgentReconcile }) {
+  const declaredNotExposed = gw.drift?.declared_not_exposed ?? [];
+  const usedNotDeclared = gw.drift?.used_not_declared ?? [];
+  const hasDrift = declaredNotExposed.length > 0 || usedNotDeclared.length > 0;
+  return (
+    <div className="px-4 py-3 border-b border-zinc-200 bg-violet-50/30">
+      <div className="mb-2 flex items-center gap-1.5 text-xs text-zinc-500">
+        <Cpu className="h-3.5 w-3.5" />
+        Model access via gateway
+        <span className="ml-auto rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700">
+          enforced by LiteLLM
+        </span>
+      </div>
+      <div className="space-y-2 text-xs">
+        <div>
+          <span className="text-zinc-400">Declared</span>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {gw.declared_models.length ? (
+              gw.declared_models.map((m) => (
+                <code key={m} className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] text-zinc-700">
+                  {m}
+                </code>
+              ))
+            ) : (
+              <span className="text-zinc-400">none</span>
+            )}
+          </div>
+        </div>
+        <div>
+          <span className="text-zinc-400">
+            Observed ({gw.observed_calls} calls · ${gw.observed_cost_usd.toFixed(4)})
+          </span>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {gw.observed_models.length ? (
+              gw.observed_models.map((m) => (
+                <code key={m} className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] text-zinc-700">
+                  {m.split("/").pop()}
+                </code>
+              ))
+            ) : (
+              <span className="text-zinc-400">no calls in window</span>
+            )}
+          </div>
+        </div>
+        {hasDrift ? (
+          <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-amber-700">
+            <div className="flex items-center gap-1.5 font-medium">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              Drift detected
+            </div>
+            {declaredNotExposed.length > 0 && (
+              <p className="mt-1 text-[11px]">
+                Declared but not exposed by gateway: {declaredNotExposed.join(", ")}
+              </p>
+            )}
+            {usedNotDeclared.length > 0 && (
+              <p className="mt-1 text-[11px]">
+                Used but not declared: {usedNotDeclared.join(", ")}
+              </p>
+            )}
+          </div>
+        ) : (
+          gw.declared_models.length > 0 && (
+            <p className="flex items-center gap-1.5 text-[11px] text-emerald-600">
+              <ShieldCheck className="h-3.5 w-3.5" /> Declared access matches gateway &amp; usage
+            </p>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PolicyCard({
   name,
   policy,
+  gateway,
 }: {
   name: string;
   policy: AgentPolicy;
+  gateway?: GatewayAgentReconcile;
 }) {
+  const tools = policy.tools ?? [];
+  const rules = policy.rules ?? [];
   return (
     <div className="rounded-lg border border-zinc-200 bg-white overflow-hidden">
       <div className="border-b border-zinc-200 px-4 py-3">
@@ -75,26 +158,31 @@ function PolicyCard({
         )}
       </div>
 
+      {/* Model access via the gateway (reconciled live) */}
+      {gateway && <GatewayAccessSection gw={gateway} />}
+
       {/* Tools granted */}
-      <div className="px-4 py-3 border-b border-zinc-200">
-        <div className="mb-2 flex items-center gap-1.5 text-xs text-zinc-500">
-          <Wrench className="h-3.5 w-3.5" />
-          Tools granted
+      {tools.length > 0 && (
+        <div className="px-4 py-3 border-b border-zinc-200">
+          <div className="mb-2 flex items-center gap-1.5 text-xs text-zinc-500">
+            <Wrench className="h-3.5 w-3.5" />
+            Tools granted
+          </div>
+          <div className="space-y-1.5">
+            {tools.map((t) => (
+              <div key={t.name} className="flex items-center gap-2 text-xs">
+                <code className="text-zinc-700">{t.name}</code>
+                <ToolBadge effect={t.effect} />
+                {t.scope && <span className="text-zinc-400">· {t.scope}</span>}
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="space-y-1.5">
-          {policy.tools.map((t) => (
-            <div key={t.name} className="flex items-center gap-2 text-xs">
-              <code className="text-zinc-700">{t.name}</code>
-              <ToolBadge effect={t.effect} />
-              {t.scope && <span className="text-zinc-400">· {t.scope}</span>}
-            </div>
-          ))}
-        </div>
-      </div>
+      )}
 
       {/* Rules by category */}
       <div className="divide-y divide-zinc-200">
-        {policy.rules.map((rule) => {
+        {rules.map((rule) => {
           const meta = CATEGORY_META[rule.category] ?? {
             icon: ShieldCheck,
             label: rule.category,
@@ -136,6 +224,75 @@ function PolicyCard({
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function GatewayPolicyCard({
+  policy,
+  snap,
+}: {
+  policy: GatewayPolicy;
+  snap: GatewayReconcile | null;
+}) {
+  const reachable = snap?.reachable;
+  const statusLabel = !snap?.enabled
+    ? "not configured"
+    : reachable
+    ? "reachable"
+    : "unreachable";
+  const statusCls = !snap?.enabled
+    ? "bg-zinc-100 text-zinc-500"
+    : reachable
+    ? "bg-emerald-100 text-emerald-700"
+    : "bg-red-100 text-red-600";
+  return (
+    <div className="rounded-lg border border-emerald-200 bg-white overflow-hidden lg:col-span-2">
+      <div className="border-b border-zinc-200 bg-emerald-50/50 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Globe className="h-4 w-4 text-emerald-600" />
+          <h3 className="text-sm font-semibold text-zinc-900">
+            {policy.display_name ?? "LiteLLM Gateway"}
+          </h3>
+          <span className={`ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium ${statusCls}`}>
+            {statusLabel}
+          </span>
+        </div>
+        {policy.description && (
+          <p className="mt-1.5 text-xs text-zinc-500">{policy.description}</p>
+        )}
+        {snap?.endpoint && (
+          <p className="mt-1 text-[11px] text-zinc-400">
+            Endpoint: <code>{snap.endpoint}</code> · model access, budgets &amp; rate
+            limits enforced by LiteLLM (CottonMouth observes &amp; reconciles)
+          </p>
+        )}
+      </div>
+      <div className="px-4 py-3">
+        <div className="mb-2 flex items-center gap-1.5 text-xs text-zinc-500">
+          <Cpu className="h-3.5 w-3.5" />
+          Models exposed by the gateway
+          <span className="text-zinc-400">(live from /v1/models)</span>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {snap?.available_models?.length ? (
+            snap.available_models.map((m) => (
+              <code key={m} className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] text-zinc-700">
+                {m}
+              </code>
+            ))
+          ) : (
+            <span className="text-xs text-zinc-400">
+              {snap?.enabled ? "gateway not reachable" : "gateway not configured"}
+            </span>
+          )}
+        </div>
+        <p className="mt-2 text-[11px] text-zinc-400">
+          {snap?.db_backed
+            ? "Gateway is DB-backed: per-agent virtual-key budgets and spend are tracked."
+            : "Per-agent budgets/spend require enabling the gateway's database (virtual keys). Model access + drift shown below per agent."}
+        </p>
       </div>
     </div>
   );
@@ -246,16 +403,18 @@ function AuditPanel({ audit }: { audit: PermissionAudit }) {
 export default function GovernancePage() {
   const [policies, setPolicies] = useState<PolicyDoc | null>(null);
   const [audit, setAudit] = useState<PermissionAudit | null>(null);
+  const [gateway, setGateway] = useState<GatewayReconcile | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     const load = () =>
-      Promise.all([fetchPolicies(), fetchPermissionAudit()])
-        .then(([p, a]) => {
+      Promise.all([fetchPolicies(), fetchPermissionAudit(), fetchGateway()])
+        .then(([p, a, g]) => {
           if (!active) return;
           setPolicies(p);
           setAudit(a);
+          setGateway(g);
           setError(null);
         })
         .catch((e) => active && setError(e instanceof Error ? e.message : "Failed to load"));
@@ -268,6 +427,9 @@ export default function GovernancePage() {
   }, []);
 
   const agentEntries = policies ? Object.entries(policies.agents) : [];
+  const gatewayByAgent = new Map(
+    (gateway?.agents ?? []).map((g) => [g.agent_name, g]),
+  );
 
   return (
     <div className="space-y-6">
@@ -297,14 +459,22 @@ export default function GovernancePage() {
         <h2 className="mb-3 text-sm font-medium text-zinc-600">
           Policy definitions
         </h2>
-        {agentEntries.length === 0 ? (
+        {agentEntries.length === 0 && !policies?.llm_gateway ? (
           <p className="rounded-lg border border-zinc-200 bg-white px-4 py-8 text-center text-sm text-zinc-400">
-            No agent policies defined.
+            No policies defined.
           </p>
         ) : (
           <div className="grid gap-4 lg:grid-cols-2">
+            {policies?.llm_gateway && (
+              <GatewayPolicyCard policy={policies.llm_gateway} snap={gateway} />
+            )}
             {agentEntries.map(([name, policy]) => (
-              <PolicyCard key={name} name={name} policy={policy} />
+              <PolicyCard
+                key={name}
+                name={name}
+                policy={policy}
+                gateway={gatewayByAgent.get(name)}
+              />
             ))}
           </div>
         )}

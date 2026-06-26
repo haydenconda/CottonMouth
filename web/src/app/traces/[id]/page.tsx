@@ -68,6 +68,9 @@ function SpanRow({
       ? JSON.stringify(span.tool_input)
       : "";
   const toolOutput = span.tool_output as { result?: string; error?: string } | undefined;
+  const origin = span.metadata?.origin;
+  const policy = span.metadata?.policy;
+  const viaLitellm = span.metadata?.source === "litellm";
   const hasDetail =
     span.input != null ||
     span.output != null ||
@@ -77,6 +80,8 @@ function SpanRow({
     !!span.reasoning ||
     !!span.permission_policy ||
     !!toolInputStr ||
+    !!origin ||
+    !!(policy && (policy.violations?.length ?? 0) > 0) ||
     !!(toolOutput && (toolOutput.result || toolOutput.error));
 
   return (
@@ -105,6 +110,11 @@ function SpanRow({
           {isDecision && span.chosen_option && (
             <span className="ml-2 text-xs text-amber-600/80">
               → chose {span.chosen_option}
+            </span>
+          )}
+          {viaLitellm && (
+            <span className="ml-2 rounded border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-600">
+              via LiteLLM{span.metadata?.provider ? ` · ${span.metadata.provider}` : ""}
             </span>
           )}
         </span>
@@ -232,6 +242,80 @@ function SpanRow({
               >
                 {span.permission_policy}
               </p>
+            </div>
+          )}
+
+          {/* Where did it originate? */}
+          {origin && (
+            <div className="mb-3">
+              <span className="text-zinc-400">Call origin</span>
+              <div className="mt-1 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 rounded border border-zinc-200 bg-white p-3">
+                {origin.agent && (
+                  <div>
+                    <span className="text-zinc-400">Agent / identity</span>
+                    <p className="text-zinc-700 mt-0.5">{origin.agent}</p>
+                  </div>
+                )}
+                {origin.caller && (
+                  <div>
+                    <span className="text-zinc-400">Caller</span>
+                    <p className="text-zinc-700 mt-0.5 font-mono">{origin.caller}</p>
+                  </div>
+                )}
+                {(origin.pod || origin.host) && (
+                  <div>
+                    <span className="text-zinc-400">Pod / host</span>
+                    <p className="text-zinc-700 mt-0.5 font-mono">
+                      {origin.pod || origin.host}
+                      {origin.pid ? ` (pid ${origin.pid})` : ""}
+                    </p>
+                  </div>
+                )}
+                {origin.provider && (
+                  <div>
+                    <span className="text-zinc-400">Provider</span>
+                    <p className="text-zinc-700 mt-0.5">{origin.provider}</p>
+                  </div>
+                )}
+                {span.metadata?.correlated !== undefined && (
+                  <div>
+                    <span className="text-zinc-400">Correlation</span>
+                    <p className="text-zinc-700 mt-0.5">
+                      {span.metadata.correlated ? "nested under agent run" : "standalone trace"}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Gateway policy decision */}
+          {policy && (policy.violations?.length ?? 0) > 0 && (
+            <div className="mb-3">
+              <span className="text-red-600 font-medium">
+                Gateway policy ({policy.result})
+              </span>
+              <div className="mt-1 space-y-1.5">
+                {policy.violations!.map((v) => (
+                  <div
+                    key={v.rule_id}
+                    className={`rounded border p-2.5 ${
+                      v.blocking
+                        ? "border-red-500/20 bg-red-500/5 text-red-600"
+                        : "border-amber-500/20 bg-amber-500/5 text-amber-600"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <code className="text-[11px]">{v.rule_id}</code>
+                      <span className="rounded bg-white/60 px-1.5 py-0.5 text-[10px] font-medium">
+                        {v.blocking ? "blocked" : "flagged"}
+                      </span>
+                      <span className="text-[10px] opacity-70">{v.phase}-call</span>
+                    </div>
+                    <p className="mt-1 text-[11px]">{v.message}</p>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

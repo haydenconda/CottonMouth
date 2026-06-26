@@ -570,11 +570,19 @@ def _adf_to_text(adf: dict) -> str:
 # ---------------------------------------------------------------------------
 
 # Only the most recent spans are kept in memory. The trace file is append-only
-# and grows unbounded (an infra-failure burst once pushed it to 64MB / 90k
-# lines, which OOM-killed the 512Mi backend when loaded whole). We instead
-# stream the file and retain just the tail -- enough for the dashboard's
-# recent-window stats -- which bounds memory regardless of on-disk size.
+# and grows unbounded (an infra-failure burst once pushed it to 164MB / 227k
+# lines, which OOM-killed the backend when loaded whole and blocked the event
+# loop long enough for the liveness probe to kill the pod). We seek to the tail
+# of the file and retain just the most recent lines -- enough for the
+# dashboard's recent-window stats -- which bounds BOTH memory and IO/CPU
+# regardless of on-disk size.
 _TRACES_WINDOW = 12000
+
+# Never read more than this many bytes from the end of the file. At ~750
+# bytes/span this comfortably holds far more than _TRACES_WINDOW lines, so the
+# window is line-bounded in the common case and byte-bounded as a hard backstop
+# for pathologically large files.
+_MAX_TAIL_BYTES = 48 * 1024 * 1024
 
 # Parsed-trace cache keyed on the file's (mtime, size). The file is append-only,
 # so any write changes the key and invalidates the cache; between writes the many
@@ -582,14 +590,37 @@ _TRACES_WINDOW = 12000
 _TRACES_CACHE: dict[str, object] = {"key": None, "spans": []}
 
 
+def _read_tail_lines(path, max_lines: int, max_bytes: int) -> list[str]:
+    """Return up to ``max_lines`` lines from the end of ``path`` without reading
+    more than ``max_bytes`` from disk.
+
+    Seeks to ``size - max_bytes`` (discarding the first, likely-partial line)
+    so peak memory and IO are independent of the file's total size.
+    """
+    from collections import deque
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    try:
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                f.readline()  # drop the partial line at the seek boundary
+            tail = deque(f, maxlen=max_lines)
+    except OSError:
+        return []
+    return [ln.decode("utf-8", "replace") for ln in tail]
+
+
 def _load_traces_file() -> list[dict]:
     """Return the most recent spans (up to ``_TRACES_WINDOW``).
 
-    Streams the file with a bounded deque so peak memory is independent of the
-    (unbounded) on-disk file size, and caches the parsed window keyed on the
-    file's mtime/size.
+    Reads only the tail of the file (bounded by ``_MAX_TAIL_BYTES`` /
+    ``_TRACES_WINDOW``) so peak memory and IO are independent of the (unbounded)
+    on-disk file size, and caches the parsed window keyed on the file's
+    mtime/size.
     """
-    from collections import deque
     from src.common.paths import traces_file as _traces_file
     traces_file = _traces_file()
     if not traces_file.exists():
@@ -604,12 +635,7 @@ def _load_traces_file() -> list[dict]:
         return _TRACES_CACHE["spans"]  # type: ignore[return-value]
 
     spans: list[dict] = []
-    try:
-        with open(traces_file, "r", encoding="utf-8") as f:
-            tail = deque(f, maxlen=_TRACES_WINDOW)
-    except OSError:
-        return []
-    for line in tail:
+    for line in _read_tail_lines(traces_file, _TRACES_WINDOW, _MAX_TAIL_BYTES):
         line = line.strip()
         if line:
             try:
@@ -664,6 +690,9 @@ async def _exec_get_trace(args: dict) -> dict:
             # Permission pillar ("what was it allowed to do").
             "permission_result": s.get("permission_result", ""),
             "permission_policy": s.get("permission_policy", ""),
+            # Span metadata: integration source (e.g. "litellm"), provider, call
+            # origination (caller/host/pod), and gateway-policy decision.
+            "metadata": s.get("metadata") or {},
         })
     total_cost = sum(s.get("cost_usd", 0) for s in matching)
     root = next((s for s in matching if s.get("span_type") == "agent_run"), matching[0])

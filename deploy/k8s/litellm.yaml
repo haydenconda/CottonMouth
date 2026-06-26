@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cottonmouth-litellm
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: litellm
+  # IRSA is the preferred way to give the gateway (and ONLY the gateway) Bedrock
+  # access — agents then hold no provider creds. Where IAM role creation is
+  # allowed, annotate here and drop the cottonmouth-aws-creds envFrom below:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/cottonmouth-litellm-bedrock
+  # (reuse the trust + policy JSON in deploy/aws/).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cottonmouth-litellm
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: litellm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: cottonmouth
+        app.kubernetes.io/component: litellm
+    spec:
+      serviceAccountName: cottonmouth-litellm
+      containers:
+        - name: litellm
+          # Official LiteLLM proxy + the CottonMouth SDK (deploy/litellm/Dockerfile).
+          image: cottonmouth-litellm:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
+          ports:
+            - name: http
+              containerPort: 4000
+          env:
+            # CottonMouth observability: the loaded callback self-configures its
+            # HTTP exporter from these and ships spans to the backend.
+            - name: COTTONMOUTH_ENDPOINT
+              value: http://cottonmouth-backend:8150
+            - name: COTTONMOUTH_EXPORT
+              value: http
+            - name: AWS_REGION
+              value: us-east-1
+            # Gateway auth. Agents present this as their OpenAI api_key.
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cottonmouth-litellm-secret
+                  key: master-key
+          # Bedrock creds for the gateway. In this sandbox IAM role creation is
+          # blocked by an SCP, so the gateway uses short-lived creds from a Secret.
+          # Where IRSA is available, drop this and annotate the ServiceAccount.
+          envFrom:
+            - secretRef:
+                name: cottonmouth-aws-creds
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/liveness
+              port: 4000
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              # LiteLLM spikes past 1Gi importing boto3 + the model-cost map on
+              # startup (single worker); give it headroom.
+              memory: 2Gi
+      volumes:
+        - name: config
+          configMap:
+            name: cottonmouth-litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: litellm
+spec:
+  # In-cluster only (no public ingress). Agents call http://litellm:4000.
+  selector:
+    app.kubernetes.io/component: litellm
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000

@@ -9,7 +9,10 @@ dependencies = []
 anthropic = ["anthropic>=0.30"]
 openai = ["openai>=1.0"]
 aws = ["boto3>=1.35"]
-all = ["anthropic>=0.30", "openai>=1.0", "boto3>=1.35"]
+# Pinned above 1.59.x: LiteLLM #8842 (Router.acompletion not firing async
+# CustomLogger hooks) means async gateway traffic could silently go untraced.
+litellm = ["litellm>=1.65,<2"]
+all = ["anthropic>=0.30", "openai>=1.0", "boto3>=1.35", "litellm>=1.65,<2"]
 
 [build-system]
 requires = ["hatchling"]

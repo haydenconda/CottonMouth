@@ -109,6 +109,41 @@ export interface Span {
   permission_result?: "allow" | "deny" | "";
   permission_policy?: string;
   children?: Span[];
+  // Integration metadata: source ("litellm"), provider, correlation, call
+  // origin (caller/host/pod), and gateway-policy decision.
+  metadata?: SpanMetadata;
+}
+
+export interface SpanOrigin {
+  agent?: string;
+  identity?: string;
+  provider?: string;
+  caller?: string;
+  host?: string;
+  pod?: string;
+  pid?: number;
+}
+
+export interface SpanPolicyDecision {
+  result?: "allow" | "deny";
+  policy?: string;
+  message?: string;
+  violations?: Array<{
+    rule_id: string;
+    category: string;
+    message: string;
+    blocking: boolean;
+    phase: string;
+  }>;
+}
+
+export interface SpanMetadata {
+  source?: string;
+  provider?: string;
+  correlated?: boolean;
+  origin?: SpanOrigin;
+  policy?: SpanPolicyDecision;
+  [key: string]: unknown;
 }
 
 export interface TraceDetail {
@@ -202,13 +237,34 @@ export interface PolicyRule {
   values: string[];
 }
 
+export interface GatewayRule {
+  id: string;
+  category: "provider" | "model" | "tokens" | "identity" | "cost" | string;
+  effect: string;
+  phase?: "pre" | "post";
+  enforce?: "block" | "flag";
+  description?: string;
+  values?: string[];
+  limit?: number;
+}
+
+export interface GatewayPolicy {
+  display_name?: string;
+  description?: string;
+  enforcement?: string;
+  default_effect?: string;
+  rules: GatewayRule[];
+}
+
 export interface AgentPolicy {
   display_name?: string;
   description?: string;
   enforcement?: string;
   default_effect?: string;
-  tools: PolicyTool[];
-  rules: PolicyRule[];
+  tools?: PolicyTool[];
+  rules?: PolicyRule[];
+  /** Gateway-only agents declare model access here instead of tools/rules. */
+  gateway?: { key_alias?: string; declared_models?: string[] };
 }
 
 export interface PolicyDoc {
@@ -216,6 +272,8 @@ export interface PolicyDoc {
   updated?: string;
   description?: string;
   agents: Record<string, AgentPolicy>;
+  /** Org-wide policies enforced on every LiteLLM gateway call. */
+  llm_gateway?: GatewayPolicy;
 }
 
 export interface PermissionAudit {
@@ -363,6 +421,38 @@ export async function createInvestigation(body: InvestigateRequest): Promise<Inv
 
 export async function fetchPolicies(): Promise<PolicyDoc> {
   return apiFetch<PolicyDoc>("/api/policies");
+}
+
+export interface GatewayAgentReconcile {
+  agent_name: string;
+  display_name: string;
+  key_alias: string;
+  declared_models: string[];
+  observed_models: string[];
+  observed_calls: number;
+  observed_cost_usd: number;
+  drift: {
+    declared_not_exposed: string[];
+    used_not_declared: string[];
+  };
+}
+
+export interface GatewayReconcile {
+  enabled: boolean;
+  reachable: boolean;
+  endpoint: string;
+  /** True only when the gateway is DB-backed (per-key budgets/spend available). */
+  db_backed: boolean;
+  available_models: string[];
+  agents: GatewayAgentReconcile[];
+}
+
+export async function fetchGateway(): Promise<GatewayReconcile | null> {
+  try {
+    return await apiFetch<GatewayReconcile>("/api/gateway");
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchPermissionAudit(): Promise<PermissionAudit> {

@@ -11,6 +11,9 @@ resources:
   - web.yaml
   - sample-agent.yaml
   - real-agent.yaml
+  - litellm-config.yaml
+  - litellm.yaml
+  - litellm-agent.yaml
   # Enable only when the cluster has the AWS Load Balancer Controller. Left out
   # for the sandbox deploy (access via `kubectl port-forward`) to avoid leaving
   # an orphaned ALB behind the cluster's TTL.
@@ -28,7 +31,10 @@ resources:
 images:
   - name: cottonmouth-backend
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-backend
-    newTag: v5
+    newTag: v15
   - name: cottonmouth-web
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-web
-    newTag: v5
+    newTag: v7
+  - name: cottonmouth-litellm
+    newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-litellm
+    newTag: v3

@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cottonmouth-litellm-config
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: litellm
+data:
+  # LiteLLM resolves `callbacks: <name>.<instance>` as a FILE (<config_dir>/<name>.py)
+  # — a dotted package path is mis-read as a path — so this shim re-exports the
+  # installed CottonMouth logger for a clean single-dot reference. Mounted next to
+  # config.yaml at /etc/litellm/custom_callbacks.py.
+  custom_callbacks.py: |
+    from cottonmouth.integrations.litellm import (
+        cottonmouth_callback as proxy_handler_instance,
+    )
+
+  # LiteLLM proxy config. Mounted at /etc/litellm/config.yaml.
+  config.yaml: |
+    # Models the gateway exposes (OpenAI-format names -> Bedrock under the hood).
+    # The gateway holds the only Bedrock credentials (via the pod env / IRSA);
+    # callers never see provider creds.
+    model_list:
+      - model_name: claude-3-haiku
+        litellm_params:
+          model: bedrock/anthropic.claude-3-haiku-20240307-v1:0
+          aws_region_name: us-east-1
+      - model_name: claude-3-sonnet
+        litellm_params:
+          model: bedrock/anthropic.claude-3-sonnet-20240229-v1:0
+          aws_region_name: us-east-1
+
+    litellm_settings:
+      # CottonMouth observability: every gateway call becomes an llm_call span,
+      # and the gateway's own denials are recorded as permission_checks. The SDK
+      # self-configures its HTTP exporter from COTTONMOUTH_ENDPOINT (see Deployment).
+      callbacks: custom_callbacks.proxy_handler_instance
+      drop_params: true
+
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+
+    # MCP tool gateway: none configured yet. Add entries here to broker MCP tools
+    # through the same gateway (they surface at GET /mcp), e.g.:
+    # mcp_servers:
+    #   github:
+    #     url: https://api.githubcopilot.com/mcp/
+    #
+    # Per-agent virtual keys, budgets, and spend tracking require LiteLLM's
+    # Postgres (DATABASE_URL). This first cut runs DB-less with a master key;
+    # enable a DB to issue per-agent virtual keys that CottonMouth can reconcile.

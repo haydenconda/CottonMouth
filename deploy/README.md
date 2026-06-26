@@ -101,6 +101,68 @@ kubectl -n cottonmouth exec deploy/cottonmouth-backend -- \
 kubectl -n cottonmouth logs deploy/cottonmouth-sample-agent --tail=5
 ```
 
+## LiteLLM gateway (CORE-10625)
+
+A single shared **LiteLLM proxy** runs in-cluster as the LLM gateway. It holds
+the only Bedrock credentials, exposes one OpenAI-format endpoint
+(`http://litellm:4000`), and runs the CottonMouth `CustomLogger` so every gateway
+call becomes an `llm_call` span in the backend (and the gateway's own denials
+become `permission_check`s). Agents drop their direct Bedrock creds and call the
+gateway with a key.
+
+```
+┌──────────────┐  OpenAI fmt + key   ┌─────────────┐  Bedrock (IRSA/Secret)  ┌─────────┐
+│ litellm-agent │ ──────────────────▶ │   litellm    │ ──────────────────────▶ │ Bedrock │
+└──────────────┘  metadata.cottonmouth└──────┬──────┘                          └─────────┘
+                                             │ CottonmouthLogger callback
+                                             ▼  POST /api/spans
+                                       cottonmouth-backend
+```
+
+Build & push the gateway image (official LiteLLM + the CottonMouth SDK, so the
+callback is importable). Build from the **repo root** so `sdk/` is in context:
+
+```bash
+aws ecr create-repository --repository-name cottonmouth-litellm --region $REGION || true
+docker build --platform linux/amd64 -f deploy/litellm/Dockerfile -t $ECR/cottonmouth-litellm:v1 .
+docker push $ECR/cottonmouth-litellm:v1
+```
+
+Create the gateway key Secret (not in git), then deploy:
+
+```bash
+kubectl -n cottonmouth create secret generic cottonmouth-litellm-secret \
+  --from-literal=master-key="sk-$(openssl rand -hex 16)"
+kubectl apply -k deploy/k8s
+kubectl -n cottonmouth rollout status deploy/cottonmouth-litellm
+```
+
+Bedrock creds for the gateway: prefer **IRSA** on the `cottonmouth-litellm`
+ServiceAccount (annotate the SA, drop the `cottonmouth-aws-creds` envFrom in
+`litellm.yaml`). In this sandbox an SCP blocks IAM role creation, so the gateway
+reuses the short-lived `cottonmouth-aws-creds` Secret like the other agents.
+
+Verify the acceptance criteria:
+
+```bash
+# Models the gateway exposes
+kubectl -n cottonmouth exec deploy/cottonmouth-litellm -- \
+  curl -s http://127.0.0.1:4000/v1/models -H "Authorization: Bearer $KEY"
+
+# An in-cluster completion using the gateway's creds (caller has none)
+kubectl -n cottonmouth exec deploy/cottonmouth-litellm -- curl -s \
+  http://127.0.0.1:4000/v1/chat/completions -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-3-haiku","messages":[{"role":"user","content":"hi"}]}'
+
+# ...and confirm the matching llm_call span landed in the backend
+kubectl -n cottonmouth logs deploy/cottonmouth-litellm-agent --tail=5
+```
+
+> Per-agent **virtual keys, budgets, and spend tracking** require LiteLLM's
+> Postgres (`DATABASE_URL`). This first cut runs DB-less with a master key; enable
+> a DB to issue per-agent keys that CottonMouth reconciles in the governance view.
+
 ## Optional: Bedrock Investigate (IRSA)
 
 The "Investigate" feature calls AWS Bedrock. To enable it in-cluster:

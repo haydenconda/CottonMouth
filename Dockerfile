@@ -27,7 +27,8 @@ COPY examples ./examples
 COPY agent_policies.json ./
 
 # Install the CottonMouth SDK into the venv so the sample agent can `import cottonmouth`.
-RUN uv pip install ./sdk
+# The [litellm] extra lets the gateway-agent example route via LiteLLM in-cluster.
+RUN uv pip install './sdk[litellm]'
 
 RUN mkdir -p /data
 VOLUME ["/data"]

@@ -125,6 +125,75 @@ kubectl -n cottonmouth port-forward svc/cottonmouth-web 8080:3000
 | `POST` | `/api/investigate` | Ask the Bedrock investigate agent (poll `GET /api/investigate/{id}`). |
 | `GET`  | `/api/health` | Health snapshot. |
 
+## Integrations
+
+CottonMouth meets agents where they already are. If your calls already flow
+through a gateway or another SDK, you can stream them in without rewriting agent
+code.
+
+| Integration | Mode | Install | Register |
+|-------------|------|---------|----------|
+| **LiteLLM** | SDK + Proxy | `pip install "cottonmouth[litellm]"` | `litellm.callbacks = [CottonmouthLogger()]` |
+| Anthropic / OpenAI / Bedrock | SDK auto-instrument | `cottonmouth[all]` | `cottonmouth.configure(auto_instrument=True)` |
+
+### LiteLLM gateway
+
+LiteLLM gets your requests to the model; CottonMouth tells you what your agent
+did with them, and whether it was allowed. Every LiteLLM completion becomes an
+`llm_call` span (model, tokens, cost, latency, status) that nests under the
+owning `agent_run`.
+
+```python
+import litellm, cottonmouth
+from cottonmouth.integrations.litellm import CottonmouthLogger, with_cottonmouth
+
+cottonmouth.configure(export="http", endpoint="http://cottonmouth-backend:8150",
+                      auto_instrument=False)  # the callback is the single span source
+litellm.callbacks = [CottonmouthLogger()]
+
+# Thread the active agent_run context into the call so the span nests correctly:
+litellm.completion(model="bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                   messages=[...], **with_cottonmouth())
+```
+
+Proxy mode — reference the ready-made instance in `config.yaml`:
+
+```yaml
+litellm_settings:
+  callbacks: cottonmouth.integrations.litellm.cottonmouth_callback
+```
+
+**Enforcement vs. observation.** CottonMouth does **not** duplicate LiteLLM's
+gateway controls. Model access, budgets, rate limits, and guardrails are enforced
+by the LiteLLM gateway via virtual keys; CottonMouth *observes* those decisions —
+when the gateway rejects a call it records the verdict as a `permission_check`
+(deny, attributed to LiteLLM, classified as budget / model-access / rate-limit /
+auth / guardrail) feeding the governance and events views. Successful calls
+record the gateway's allow. CottonMouth's own policy layer governs what LiteLLM
+can't see: the agent's tool/file/command/network permissions.
+
+```python
+from cottonmouth.integrations.litellm import enable
+enable()   # observability only — the gateway owns enforcement
+```
+
+**Call provenance.** Every `llm_call` span carries an `origin` block — the
+agent/identity, the resolved provider, the host/pod/pid, and the `file:line:func`
+call site — surfaced in the trace detail view so you can see exactly where a
+gateway call came from.
+
+Notes:
+- **Correlation** is resolved in three tiers: explicit `metadata.cottonmouth`
+  (via `with_cottonmouth()`, survives thread/process hops) → in-process
+  contextvars → a standalone trace (a call is never dropped).
+- **Cost** uses LiteLLM's computed `response_cost` (authoritative across
+  providers), falling back to CottonMouth's estimate.
+- **Identity**: LiteLLM virtual-key / team / user tags are mapped onto agent
+  identity and surfaced in the governance view.
+- **Streaming** is aggregated into one span per call (not one per token), and the
+  callback is non-blocking — exporter errors never break the LiteLLM request path.
+- Runnable demo: [`examples/litellm_agent.py`](examples/litellm_agent.py).
+
 ## Optional: macOS ticker
 
 The Swift menu-bar app in `CondaMon/` is a local-only UI and is not part of the

@@ -51,6 +51,16 @@ spec:
           envFrom:
             - configMapRef:
                 name: cottonmouth-config
+          env:
+            # Read-only reconcile of gateway entitlements (models, and key
+            # budget/spend when the gateway is DB-backed) for the governance view.
+            - name: LITELLM_BASE_URL
+              value: http://litellm:4000
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cottonmouth-litellm-secret
+                  key: master-key
           readinessProbe:
             httpGet:
               path: /api/health
@@ -63,13 +73,18 @@ spec:
               port: http
             initialDelaySeconds: 15
             periodSeconds: 20
+            # Tolerate a transient slow read instead of killing the pod on the
+            # first miss; heavy reads now run off the event loop, but this adds
+            # margin so a one-off GC pause can't trigger a restart.
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 512Mi
             limits:
               cpu: "1"
-              memory: 1Gi
+              memory: 2Gi
           volumeMounts:
             - name: data
               mountPath: /data
