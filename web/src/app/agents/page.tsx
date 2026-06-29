@@ -2,9 +2,22 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { fetchAgents, type AgentSummary } from "@/lib/api";
-import { formatDuration, formatCost } from "@/lib/utils";
-import { Bot, GitBranch, Clock, DollarSign, AlertTriangle } from "lucide-react";
+import {
+  fetchAgents,
+  type AgentSummary,
+  type GatewayAgentSummary,
+} from "@/lib/api";
+import { formatDuration, formatCost, timeAgo } from "@/lib/utils";
+import {
+  Bot,
+  GitBranch,
+  Clock,
+  DollarSign,
+  AlertTriangle,
+  Network,
+  Phone,
+  Ban,
+} from "lucide-react";
 
 function AgentCardSkeleton() {
   return (
@@ -110,8 +123,92 @@ function AgentCard({ agent }: { agent: AgentSummary }) {
   );
 }
 
+function GatewayAgentCard({ agent }: { agent: GatewayAgentSummary }) {
+  return (
+    <Link
+      href={`/agents/${encodeURIComponent(agent.agent_name)}`}
+      className="group rounded-lg border border-zinc-200 bg-white p-5 hover:border-zinc-300 transition-colors"
+    >
+      <div className="flex items-center gap-3 mb-4">
+        <div className="flex h-8 w-8 items-center justify-center rounded bg-sky-500/10 text-sky-600">
+          <Network className="h-4 w-4" />
+        </div>
+        <h3 className="text-sm font-medium text-zinc-800 group-hover:text-sky-600 transition-colors">
+          {agent.agent_name}
+        </h3>
+        <span
+          className="ml-auto rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-600"
+          title="Seen only via the LiteLLM gateway (no agent_run)"
+        >
+          via gateway
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded bg-zinc-100 px-3 py-2">
+          <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 mb-0.5">
+            <Phone className="h-3 w-3" />
+            Calls
+          </div>
+          <p className="text-sm font-medium text-zinc-700 tabular-nums">
+            {agent.call_count.toLocaleString()}
+          </p>
+        </div>
+
+        <div className="rounded bg-zinc-100 px-3 py-2">
+          <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 mb-0.5">
+            <DollarSign className="h-3 w-3" />
+            Total Cost
+          </div>
+          <p className="text-sm font-medium text-zinc-700 tabular-nums">
+            {formatCost(agent.total_cost_usd)}
+          </p>
+        </div>
+
+        <div className="rounded bg-zinc-100 px-3 py-2">
+          <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 mb-0.5">
+            <Ban className="h-3 w-3" />
+            Gateway Denials
+          </div>
+          <p
+            className={`text-sm font-medium tabular-nums ${
+              agent.denied_count > 0 ? "text-red-600" : "text-zinc-700"
+            }`}
+          >
+            {agent.denied_count.toLocaleString()}
+          </p>
+        </div>
+
+        <div className="rounded bg-zinc-100 px-3 py-2">
+          <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 mb-0.5">
+            <Clock className="h-3 w-3" />
+            Last Seen
+          </div>
+          <p className="text-sm font-medium text-zinc-700 tabular-nums">
+            {agent.last_seen ? timeAgo(agent.last_seen) : "—"}
+          </p>
+        </div>
+      </div>
+
+      {agent.models.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {agent.models.map((m) => (
+            <span
+              key={m}
+              className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500"
+            >
+              {m.split("/").pop()}
+            </span>
+          ))}
+        </div>
+      )}
+    </Link>
+  );
+}
+
 export default function AgentsPage() {
   const [agents, setAgents] = useState<AgentSummary[]>([]);
+  const [gatewayAgents, setGatewayAgents] = useState<GatewayAgentSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -119,6 +216,7 @@ export default function AgentsPage() {
     fetchAgents()
       .then((res) => {
         setAgents(res.agents);
+        setGatewayAgents(res.gateway_agents ?? []);
         setError(null);
       })
       .catch((err) => {
@@ -142,6 +240,7 @@ export default function AgentsPage() {
         </div>
       )}
 
+      {/* Run-instrumented agents (multi-span agent_run traces) */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {loading &&
           Array.from({ length: 6 }).map((_, i) => (
@@ -157,6 +256,26 @@ export default function AgentsPage() {
           </div>
         )}
       </div>
+
+      {/* Gateway-only agents (e.g. Cursor agents on a virtual key) */}
+      {!loading && gatewayAgents.length > 0 && (
+        <div className="space-y-3 pt-2">
+          <div className="flex items-center gap-2">
+            <Network className="h-4 w-4 text-sky-600" />
+            <h2 className="text-sm font-semibold text-zinc-900">
+              Gateway agents
+            </h2>
+            <span className="text-xs text-zinc-500">
+              via LiteLLM · model calls only (no agent_run traces)
+            </span>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {gatewayAgents.map((agent) => (
+              <GatewayAgentCard key={agent.agent_name} agent={agent} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

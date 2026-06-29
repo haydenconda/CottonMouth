@@ -11,7 +11,12 @@ from pathlib import Path
 
 from aiohttp import web
 
-from src.common.agent_stats import compute_agent_stats, compute_all_agent_stats
+from src.common.agent_stats import (
+    compute_agent_stats,
+    compute_all_agent_stats,
+    compute_gateway_agent_detail,
+    compute_gateway_agent_stats,
+)
 from src.common.paths import data_dir, traces_file
 from src.common.policies import load_policies
 from src.tools import (
@@ -280,16 +285,36 @@ async def _get_agent_stats(agent_name: str, all_spans: list[dict] | None = None)
 
 
 async def handle_agents(request: web.Request) -> web.Response:
-    """GET /api/agents -- list all agents with stats (single pass)."""
-    agents = compute_all_agent_stats(_load_traces_file())
-    return _json_response({"agents": agents, "total": len(agents)})
+    """GET /api/agents -- list all agents with stats (single pass).
+
+    ``agents`` are run-instrumented agents (multi-span agent_run traces).
+    ``gateway_agents`` are agents seen only via the LiteLLM gateway (e.g. Cursor
+    agents keyed by a virtual-key alias) — standalone llm_call spans, no runs.
+    """
+    spans = await asyncio.to_thread(_load_traces_file)
+    agents = compute_all_agent_stats(spans)
+    gateway_agents = compute_gateway_agent_stats(spans)
+    return _json_response({
+        "agents": agents,
+        "total": len(agents),
+        "gateway_agents": gateway_agents,
+        "gateway_total": len(gateway_agents),
+    })
 
 
 async def handle_agent_detail(request: web.Request) -> web.Response:
-    """GET /api/agents/:name -- single agent stats."""
+    """GET /api/agents/:name -- single agent stats.
+
+    Run-instrumented agents return run-based stats; gateway-only agents return a
+    gateway rollup with their recent individual calls (model/cost/verdict).
+    """
     name = request.match_info["name"]
-    result = await _get_agent_stats(name)
+    spans = await asyncio.to_thread(_load_traces_file)
+    result = compute_agent_stats(name, spans)
     if "error" in result:
+        gw = compute_gateway_agent_detail(name, spans)
+        if gw is not None:
+            return _json_response(gw)
         return _json_response(result, status=404)
     return _json_response(result)
 

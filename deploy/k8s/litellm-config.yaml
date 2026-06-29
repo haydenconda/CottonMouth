@@ -40,13 +40,16 @@ data:
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
+      # Postgres-backed key management: enables per-agent VIRTUAL KEYS (aliases),
+      # budgets, and spend tracking. Set via DATABASE_URL (see postgres.yaml).
+      # When unset, the gateway runs DB-less with the master key only.
+      database_url: os.environ/DATABASE_URL
+      # Persist the model_list above into the DB so /v1/models and /key/info
+      # reflect what callers (and CottonMouth's reconcile) actually see.
+      store_model_in_db: true
 
     # MCP tool gateway: none configured yet. Add entries here to broker MCP tools
     # through the same gateway (they surface at GET /mcp), e.g.:
     # mcp_servers:
     #   github:
     #     url: https://api.githubcopilot.com/mcp/
-    #
-    # Per-agent virtual keys, budgets, and spend tracking require LiteLLM's
-    # Postgres (DATABASE_URL). This first cut runs DB-less with a master key;
-    # enable a DB to issue per-agent virtual keys that CottonMouth can reconcile.

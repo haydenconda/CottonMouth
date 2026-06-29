@@ -179,6 +179,52 @@ export interface AgentSummary {
 export interface AgentsResponse {
   agents: AgentSummary[];
   total: number;
+  /** Agents seen only via the LiteLLM gateway (e.g. Cursor agents on a virtual
+   * key): standalone llm_call spans with no agent_run, rolled up by identity. */
+  gateway_agents?: GatewayAgentSummary[];
+  gateway_total?: number;
+}
+
+/** A gateway-only agent: usage rolled up from its llm_call spans. */
+export interface GatewayAgentSummary {
+  agent_name: string;
+  kind: "gateway";
+  call_count: number;
+  total_cost_usd: number;
+  avg_cost_usd: number;
+  avg_duration_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  models: string[];
+  error_count: number;
+  denied_count: number;
+  first_seen?: string | null;
+  last_seen?: string | null;
+}
+
+/** One model call made through the gateway (for the gateway-agent detail). */
+export interface GatewayCall {
+  trace_id: string;
+  span_id: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  duration_ms: number;
+  status: string;
+  verdict: string;
+  started_at: string;
+}
+
+export interface GatewayAgentDetail extends GatewayAgentSummary {
+  calls: GatewayCall[];
+}
+
+/** Type guard: a gateway-only agent detail vs a run-instrumented one. */
+export function isGatewayAgent(
+  a: AgentDetail | GatewayAgentDetail,
+): a is GatewayAgentDetail {
+  return (a as GatewayAgentDetail).kind === "gateway";
 }
 
 export interface AgentDetail {
@@ -381,10 +427,14 @@ export async function fetchAgents(): Promise<AgentsResponse> {
   }
 }
 
-export async function fetchAgent(name: string): Promise<AgentDetail> {
+export async function fetchAgent(
+  name: string,
+): Promise<AgentDetail | GatewayAgentDetail> {
   if (DEMO_MODE) return demoAgent(name);
   try {
-    return await apiFetch<AgentDetail>(`/api/agents/${encodeURIComponent(name)}`);
+    return await apiFetch<AgentDetail | GatewayAgentDetail>(
+      `/api/agents/${encodeURIComponent(name)}`,
+    );
   } catch {
     return demoAgent(name);
   }

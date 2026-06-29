@@ -1,0 +1,113 @@
+# Postgres backing store for the LiteLLM gateway. Enables per-agent/per-dev
+# VIRTUAL KEYS (key aliases), budgets, and spend tracking — the management
+# surface CottonMouth reads (/key/info) to reconcile each agent's model access.
+#
+# Without this, the gateway runs DB-less with a single master key and every call
+# collapses to one identity. With it, you mint a key per agent (e.g. alias
+# "devils-council") and CottonMouth attributes calls + cost per alias.
+#
+# The password / DATABASE_URL are NOT committed — create them at deploy time:
+#   PW=$(openssl rand -hex 16)
+#   kubectl -n cottonmouth create secret generic litellm-db-secret \
+#     --from-literal=password="$PW" \
+#     --from-literal=database-url="postgresql://litellm:$PW@litellm-db:5432/litellm"
+#
+# For production prefer RDS (drop this Deployment, point database-url at RDS, and
+# give the pod IRSA). This in-cluster Postgres is for the sandbox/demo.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: litellm-db-data
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: litellm-db
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # The sandbox EKS cluster has no DEFAULT StorageClass; name gp2 explicitly
+  # (matches cottonmouth-data). Adjust to your cluster's class in production.
+  storageClassName: gp2
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-db
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: litellm-db
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # single RWO volume; never run two pods against it at once
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: litellm-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: cottonmouth
+        app.kubernetes.io/component: litellm-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: pg
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: litellm
+            - name: POSTGRES_DB
+              value: litellm
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-db-secret
+                  key: password
+            # Keep PGDATA in a subdir so lost+found on the PV root can't block init.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U litellm -d litellm"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U litellm -d litellm"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: litellm-db-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-db
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: litellm-db
+spec:
+  selector:
+    app.kubernetes.io/component: litellm-db
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: 5432

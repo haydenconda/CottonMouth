@@ -159,9 +159,61 @@ kubectl -n cottonmouth exec deploy/cottonmouth-litellm -- curl -s \
 kubectl -n cottonmouth logs deploy/cottonmouth-litellm-agent --tail=5
 ```
 
-> Per-agent **virtual keys, budgets, and spend tracking** require LiteLLM's
-> Postgres (`DATABASE_URL`). This first cut runs DB-less with a master key; enable
-> a DB to issue per-agent keys that CottonMouth reconciles in the governance view.
+### Per-agent virtual keys (Postgres) + onboarding Cursor
+
+Per-agent **virtual keys, budgets, and spend tracking** are backed by Postgres
+(`postgres.yaml` → `litellm-db`). The gateway runs its prisma migrations on
+startup; create the DB secret before applying:
+
+```bash
+PW=$(openssl rand -hex 16)
+kubectl -n cottonmouth create secret generic litellm-db-secret \
+  --from-literal=password="$PW" \
+  --from-literal=database-url="postgresql://litellm:$PW@litellm-db:5432/litellm"
+kubectl apply -k deploy/k8s
+kubectl -n cottonmouth rollout status deploy/litellm-db
+kubectl -n cottonmouth rollout restart deploy/cottonmouth-litellm   # re-run migrations
+```
+
+Mint a key per agent/team — the alias is the identity CottonMouth attributes the
+calls to and reconciles on the governance page:
+
+```bash
+MK=$(kubectl -n cottonmouth get secret cottonmouth-litellm-secret -o jsonpath='{.data.master-key}' | base64 -d)
+kubectl -n cottonmouth exec deploy/cottonmouth-litellm -- curl -s \
+  http://127.0.0.1:4000/key/generate -H "Authorization: Bearer $MK" \
+  -H 'Content-Type: application/json' \
+  -d '{"key_alias":"devils-council","models":["claude-3-haiku","claude-3-sonnet"],"max_budget":50}'
+# -> {"key":"sk-...", ...}  hand THIS virtual key (not the master key) to the dev
+```
+
+Declare the agent in `agent_policies.json` so it appears on the governance page
+with declared-vs-observed reconciliation. The policy is mounted from a ConfigMap
+(no image rebuild) — edit the file, then:
+
+```bash
+kubectl -n cottonmouth create configmap cottonmouth-policies \
+  --from-file=agent_policies.json=agent_policies.json \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n cottonmouth rollout restart deploy/cottonmouth-backend
+```
+
+**Point Cursor at the gateway.** Expose the gateway externally first — enable
+`ingress.yaml` (needs the AWS Load Balancer Controller) for a stable HTTPS URL,
+or for a quick local test `kubectl -n cottonmouth port-forward svc/litellm 4000:4000`.
+Then in Cursor: **Settings → Models → Override OpenAI Base URL** = `<gateway>/v1`,
+**API key** = the virtual key, and add a custom model matching the gateway's names
+(`claude-3-haiku` / `claude-3-sonnet`). Every Cursor model call now routes through
+LiteLLM and lands in CottonMouth tagged `devils-council`.
+
+> **What you get vs. don't (Cursor built-in agents).** Cursor's agent loop runs
+> client-side, so the gateway only sees *model-completion traffic*. CottonMouth
+> captures every call (model, tokens, cost, gateway allow/deny) attributed to the
+> key alias, and reconciles it on the governance page. It does **not** see Cursor's
+> internal decisions/tool steps — those would need MCP routed through the gateway's
+> MCP server, or the agent instrumented with the CottonMouth SDK for full
+> `agent_run` traces. Gateway-only calls appear as standalone `llm_call` spans, not
+> multi-span run waterfalls.
 
 ## Optional: Bedrock Investigate (IRSA)
 

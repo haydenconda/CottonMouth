@@ -6,7 +6,9 @@ import Link from "next/link";
 import {
   fetchAgent,
   fetchTraces,
+  isGatewayAgent,
   type AgentDetail,
+  type GatewayAgentDetail,
   type TraceRun,
 } from "@/lib/api";
 import { formatDuration, formatCost, timeAgo } from "@/lib/utils";
@@ -18,13 +20,19 @@ import {
   DollarSign,
   AlertTriangle,
   Activity,
+  Network,
+  Phone,
+  Ban,
+  Coins,
 } from "lucide-react";
 
 export default function AgentDetailPage() {
   const params = useParams<{ name: string }>();
   const agentName = decodeURIComponent(params.name);
 
-  const [agent, setAgent] = useState<AgentDetail | null>(null);
+  const [agent, setAgent] = useState<AgentDetail | GatewayAgentDetail | null>(
+    null,
+  );
   const [runs, setRuns] = useState<TraceRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -32,13 +40,18 @@ export default function AgentDetailPage() {
   useEffect(() => {
     if (!agentName) return;
     setLoading(true);
-    Promise.all([
-      fetchAgent(agentName),
-      fetchTraces({ agent_name: agentName, limit: 20 }),
-    ])
-      .then(([agentRes, tracesRes]) => {
+    fetchAgent(agentName)
+      .then(async (agentRes) => {
         setAgent(agentRes);
-        setRuns(tracesRes.runs);
+        // Gateway-only agents have no agent_run traces; their calls come from
+        // the detail payload itself. Only fetch runs for instrumented agents.
+        if (!isGatewayAgent(agentRes)) {
+          const tracesRes = await fetchTraces({
+            agent_name: agentName,
+            limit: 20,
+          });
+          setRuns(tracesRes.runs);
+        }
         setError(null);
       })
       .catch((err) => {
@@ -79,6 +92,10 @@ export default function AgentDetailPage() {
         </div>
       </div>
     );
+  }
+
+  if (isGatewayAgent(agent)) {
+    return <GatewayAgentView agent={agent} />;
   }
 
   const errorRate = agent.error_rate * 100;
@@ -217,6 +234,165 @@ export default function AgentDetailPage() {
                   </td>
                   <td className="px-4 py-2.5 text-zinc-500 tabular-nums">
                     {timeAgo(run.started_at)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GatewayAgentView({ agent }: { agent: GatewayAgentDetail }) {
+  const stats = [
+    { label: "Calls", value: agent.call_count.toLocaleString(), icon: Phone },
+    {
+      label: "Total Cost",
+      value: formatCost(agent.total_cost_usd),
+      icon: DollarSign,
+    },
+    {
+      label: "Tokens (in / out)",
+      value: `${agent.input_tokens.toLocaleString()} / ${agent.output_tokens.toLocaleString()}`,
+      icon: Coins,
+    },
+    {
+      label: "Gateway Denials",
+      value: agent.denied_count.toLocaleString(),
+      icon: Ban,
+      warn: agent.denied_count > 0,
+    },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <Link
+        href="/agents"
+        className="inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-700 transition-colors"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        Back to agents
+      </Link>
+
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600">
+          <Network className="h-5 w-5" />
+        </div>
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="text-lg font-semibold text-zinc-900">
+              {agent.agent_name}
+            </h1>
+            <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-600">
+              via gateway
+            </span>
+          </div>
+          <p className="text-xs text-zinc-500">
+            {agent.call_count} gateway call{agent.call_count !== 1 && "s"} ·{" "}
+            {agent.models.map((m) => m.split("/").pop()).join(", ") || "—"}
+          </p>
+        </div>
+      </div>
+
+      {/* Context: what this view does and doesn't show */}
+      <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 px-4 py-3 text-xs text-zinc-600">
+        Seen only via the LiteLLM gateway (no <code>agent_run</code>). CottonMouth
+        captures every model call — model, tokens, cost, and the gateway&apos;s
+        allow/deny verdict — attributed to this virtual-key identity. Internal
+        decision/tool steps aren&apos;t visible unless routed through the gateway
+        (MCP) or instrumented with the SDK.
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        {stats.map((s) => (
+          <div
+            key={s.label}
+            className="rounded-lg border border-zinc-200 bg-white p-5"
+          >
+            <div className="flex items-center gap-2 text-xs text-zinc-500 mb-2">
+              <s.icon className="h-3.5 w-3.5" />
+              {s.label}
+            </div>
+            <p
+              className={`text-2xl font-semibold ${
+                "warn" in s && s.warn ? "text-red-600" : "text-zinc-900"
+              }`}
+            >
+              {s.value}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      {/* Recent calls */}
+      <div className="rounded-lg border border-zinc-200 bg-white overflow-hidden">
+        <div className="border-b border-zinc-200 px-4 py-3">
+          <h2 className="text-sm font-medium text-zinc-700">Recent Calls</h2>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-xs text-zinc-500">
+                <th className="px-4 py-2.5 text-left font-medium">Trace</th>
+                <th className="px-4 py-2.5 text-left font-medium">Model</th>
+                <th className="px-4 py-2.5 text-left font-medium">Verdict</th>
+                <th className="px-4 py-2.5 text-left font-medium">Tokens</th>
+                <th className="px-4 py-2.5 text-left font-medium">Cost</th>
+                <th className="px-4 py-2.5 text-left font-medium">Duration</th>
+                <th className="px-4 py-2.5 text-left font-medium">Started</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-200">
+              {agent.calls.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center text-zinc-400">
+                    No calls found
+                  </td>
+                </tr>
+              )}
+              {agent.calls.map((c) => (
+                <tr
+                  key={c.span_id}
+                  className="hover:bg-zinc-100 transition-colors group"
+                >
+                  <td className="px-4 py-2.5">
+                    <Link
+                      href={`/traces/${c.trace_id}`}
+                      className="font-mono text-xs text-zinc-500 group-hover:text-sky-600 transition-colors"
+                    >
+                      {c.trace_id.slice(0, 8)}...
+                    </Link>
+                  </td>
+                  <td className="px-4 py-2.5 font-mono text-xs text-zinc-600">
+                    {c.model.split("/").pop()}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                        c.verdict === "deny"
+                          ? "border border-red-500/30 bg-red-500/10 text-red-600"
+                          : "border border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
+                      }`}
+                    >
+                      {c.verdict === "deny" ? "denied" : "allowed"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-zinc-600 tabular-nums">
+                    {c.input_tokens.toLocaleString()} /{" "}
+                    {c.output_tokens.toLocaleString()}
+                  </td>
+                  <td className="px-4 py-2.5 text-zinc-600 tabular-nums">
+                    {formatCost(c.cost_usd)}
+                  </td>
+                  <td className="px-4 py-2.5 text-zinc-600 tabular-nums">
+                    {formatDuration(c.duration_ms)}
+                  </td>
+                  <td className="px-4 py-2.5 text-zinc-500 tabular-nums">
+                    {c.started_at ? timeAgo(c.started_at) : "—"}
                   </td>
                 </tr>
               ))}

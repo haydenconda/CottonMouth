@@ -20,6 +20,16 @@
         "declared_models": ["claude-3-haiku"]
       }
     },
+    "devils-council": {
+      "display_name": "Devils' Council",
+      "description": "External Cursor agents that route every model call through the shared LiteLLM gateway via their team virtual key (alias 'devils-council'). CottonMouth observes the model traffic, cost, and the gateway's access decisions; it does not see Cursor's internal reasoning/tool steps unless those are MCP-routed through the gateway.",
+      "enforcement": "LiteLLM gateway (virtual key); CottonMouth observes + reconciles",
+      "default_effect": "deny",
+      "gateway": {
+        "key_alias": "devils-council",
+        "declared_models": ["claude-3-haiku", "claude-3-sonnet"]
+      }
+    },
     "ops-assistant": {
       "display_name": "Ops Assistant",
       "description": "Tool-using Bedrock agent that reads/writes files, runs shell commands, and fetches URLs inside a sandboxed workspace.",

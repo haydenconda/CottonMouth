@@ -61,6 +61,14 @@ spec:
                 secretKeyRef:
                   name: cottonmouth-litellm-secret
                   key: master-key
+            # Policy-as-data from a ConfigMap (not baked into the image), so the
+            # org-wide policy can be edited and hot-reloaded without a rebuild:
+            #   kubectl -n cottonmouth create configmap cottonmouth-policies \
+            #     --from-file=agent_policies.json=agent_policies.json \
+            #     --dry-run=client -o yaml | kubectl apply -f -
+            #   kubectl -n cottonmouth rollout restart deploy/cottonmouth-backend
+            - name: COTTONMOUTH_POLICIES_FILE
+              value: /etc/cottonmouth/agent_policies.json
           readinessProbe:
             httpGet:
               path: /api/health
@@ -88,10 +96,19 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: policies
+              mountPath: /etc/cottonmouth
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: cottonmouth-data
+        # Created from agent_policies.json at deploy time (see env comment above).
+        # Optional: if absent the backend falls back to the image's bundled copy.
+        - name: policies
+          configMap:
+            name: cottonmouth-policies
+            optional: true
 ---
 apiVersion: v1
 kind: Service

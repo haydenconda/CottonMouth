@@ -56,6 +56,15 @@ spec:
                 secretKeyRef:
                   name: cottonmouth-litellm-secret
                   key: master-key
+            # Postgres for virtual keys / budgets / spend. LiteLLM runs its prisma
+            # migrations against this on startup. Omit the secret to run DB-less.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-db-secret
+                  key: database-url
+            - name: STORE_MODEL_IN_DB
+              value: "True"
           # Bedrock creds for the gateway. In this sandbox IAM role creation is
           # blocked by an SCP, so the gateway uses short-lived creds from a Secret.
           # Where IRSA is available, drop this and annotate the ServiceAccount.

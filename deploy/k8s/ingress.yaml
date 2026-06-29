@@ -28,3 +28,37 @@ spec:
                 name: cottonmouth-web
                 port:
                   number: 3000
+---
+# Public entry point for the LiteLLM GATEWAY so external clients (e.g. a dev's
+# Cursor, pointed at this as an OpenAI-compatible base URL) route every model
+# call through it. Front it with TLS + auth (virtual keys) before exposing to
+# the org. For the sandbox, prefer `kubectl port-forward svc/litellm 4000:4000`
+# instead of provisioning a throwaway ALB.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cottonmouth-litellm
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: litellm
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    # Terminate TLS at the ALB; supply your ACM cert ARN before enabling HTTPS.
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:<acct>:certificate/<id>
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health/liveness
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: litellm
+                port:
+                  number: 4000

@@ -11,6 +11,7 @@ resources:
   - web.yaml
   - sample-agent.yaml
   - real-agent.yaml
+  - postgres.yaml
   - litellm-config.yaml
   - litellm.yaml
   - litellm-agent.yaml
@@ -31,10 +32,10 @@ resources:
 images:
   - name: cottonmouth-backend
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-backend
-    newTag: v15
+    newTag: v16
   - name: cottonmouth-web
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-web
-    newTag: v7
+    newTag: v8
   - name: cottonmouth-litellm
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-litellm
     newTag: v3
