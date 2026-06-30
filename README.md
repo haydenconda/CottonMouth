@@ -1,19 +1,22 @@
 # CottonMouth
 
-AI agent observability & governance platform. Instrument any agent with one
-decorator, ship traces to a collector, and explore every run — LLM calls, tool
-calls, decisions, cost, latency, and policy checks — in a live dashboard. An AWS
-Bedrock–backed "Investigate" agent explains failures and cost anomalies on demand.
+AI agent observability & governance platform. Explore every agent run — LLM
+calls, tool calls, decisions, cost, latency, and policy checks — in a live
+dashboard. Two ways to get there: route agents through a shared **LiteLLM
+gateway** and CottonMouth observes them with **zero agent code** (model *and*
+MCP tool calls, attributed per virtual key), or instrument directly with the SDK
+(`@trace_agent`) for the richest in-process reasoning. An AWS Bedrock–backed
+"Investigate" agent explains failures and cost anomalies on demand.
 
 CottonMouth is built to close the [agent observability gap](https://siddhantkhare.com/writing/agent-observability-gap):
 for every agent run, answer the four questions that matter.
 
 | Pillar | Question | How CottonMouth answers it |
 |--------|----------|----------------------------|
-| **What it did** | Which calls and tools ran? | `agent_run` / `llm_call` / `tool_call` spans |
+| **What it did** | Which calls and tools ran? | `agent_run` / `llm_call` / `tool_call` spans (incl. MCP tool calls via the gateway) |
 | **Why it did it** | What was the reasoning? | `decision` spans capture branch points |
 | **What it cost** | Tokens, dollars, latency? | Per-call token/cost accounting + spend anomalies |
-| **What it was allowed to do** | Did it stay in policy? | `permission_check` spans + policies-as-data |
+| **What it was allowed to do** | Did it stay in policy? | `permission_check` spans — the SDK's policies-as-data **and** the LiteLLM gateway's allow/deny verdicts |
 
 ```
 ┌─────────────────┐   spans over HTTP    ┌──────────────────────┐         ┌──────────────┐
@@ -32,9 +35,9 @@ for every agent run, answer the four questions that matter.
 | `src/common/agent_stats.py` | Shared, recent-window agent stats with infra-failure classification (single source of truth for the dashboard). |
 | `web/` | Next.js dashboard — overview, traces, agents, governance, and events (with live drill-downs and an interactive task runner). |
 | `agent_policies.json` | Policies-as-data: what each agent is allowed to do, enforced at runtime and surfaced in the governance view. |
-| `examples/` | Live instrumented agents (`sample_agent.py`, `real_agent.py`, `ops_agent.py`) that continuously emit realistic traces — drive the demo. |
-| `deploy/k8s/` | Kustomize manifests to run the platform on Kubernetes / EKS. |
-| `docs/ARCHITECTURE.md` | System design: Bedrock integration, policy enforcement, agent identification, EKS setup. |
+| `examples/` | Instrumented agents. **`devils_council.py`** is the flagship: a gateway-routed multi-persona reviewer that exercises all four pillars (LLM gateway + MCP gateway + SDK decision/permission spans). `ops_agent.py` is a Bedrock tool-using agent; `litellm_agent.py` shows the SDK callback. |
+| `deploy/k8s/` | Kustomize manifests to run the platform on Kubernetes / EKS, including the **LiteLLM gateway** (`litellm` + `litellm-db`). |
+| `docs/ARCHITECTURE.md` | System design centered on the LiteLLM gateway integration: the four pillars, two-span-source reconciliation, policy enforcement, agent identification, and EKS setup. |
 | `CondaMon/` | Optional macOS menu-bar ticker (local-only; not part of the cluster deploy). |
 
 ## Quick start (SDK)
@@ -136,12 +139,30 @@ code.
 | **LiteLLM** | SDK + Proxy | `pip install "cottonmouth[litellm]"` | `litellm.callbacks = [CottonmouthLogger()]` |
 | Anthropic / OpenAI / Bedrock | SDK auto-instrument | `cottonmouth[all]` | `cottonmouth.configure(auto_instrument=True)` |
 
-### LiteLLM gateway
+### LiteLLM gateway (the recommended path)
 
-LiteLLM gets your requests to the model; CottonMouth tells you what your agent
-did with them, and whether it was allowed. Every LiteLLM completion becomes an
-`llm_call` span (model, tokens, cost, latency, status) that nests under the
-owning `agent_run`.
+Put a shared LiteLLM gateway in front of every model and tool call and let
+CottonMouth observe it. The gateway holds the provider credentials, issues
+per-agent **virtual keys**, and brokers **MCP tools**; CottonMouth plugs in as a
+callback and turns that traffic into spans. Any agent that routes through the
+gateway is observed automatically — **no per-agent instrumentation and no
+provider credentials in the agent**.
+
+- Every completion becomes an `llm_call` span (model, tokens, cost, latency,
+  status) nested under the owning `agent_run`.
+- Every brokered MCP tool call becomes a `tool_call` span with a nested
+  `permission_check` for the gateway's allow/deny verdict.
+- Spans are attributed per agent via the virtual key's `user_api_key_alias`, and
+  the **Agents** view rolls up gateway-only agents (model + MCP tool usage).
+
+> **Flagship demo:** [`examples/devils_council.py`](examples/devils_council.py) —
+> a gateway-routed multi-persona code reviewer whose run lands in CottonMouth as
+> one trace: `agent_run` + per-persona `decision`/`permission_check` (SDK) + the
+> gateway-emitted `llm_call`s and a GitHub `tool_call`. See the
+> [LiteLLM Gateway Integration](https://anaconda.atlassian.net/wiki/spaces/IN/pages/6490783762)
+> page for topology and developer setup.
+
+#### SDK callback (single agent)
 
 ```python
 import litellm, cottonmouth
@@ -192,7 +213,9 @@ Notes:
   identity and surfaced in the governance view.
 - **Streaming** is aggregated into one span per call (not one per token), and the
   callback is non-blocking — exporter errors never break the LiteLLM request path.
-- Runnable demo: [`examples/litellm_agent.py`](examples/litellm_agent.py).
+- Runnable demos: [`examples/devils_council.py`](examples/devils_council.py)
+  (gateway-routed, all four pillars) and
+  [`examples/litellm_agent.py`](examples/litellm_agent.py) (SDK callback).
 
 ## Optional: macOS ticker
 
