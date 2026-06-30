@@ -48,8 +48,25 @@ data:
       # reflect what callers (and CottonMouth's reconcile) actually see.
       store_model_in_db: true
 
-    # MCP tool gateway: none configured yet. Add entries here to broker MCP tools
-    # through the same gateway (they surface at GET /mcp), e.g.:
-    # mcp_servers:
-    #   github:
-    #     url: https://api.githubcopilot.com/mcp/
+    # MCP tool gateway: brokers MCP tools through the SAME gateway so an agent's
+    # TOOL calls (not just its model calls) become observable in CottonMouth. The
+    # CottonMouth callback captures each invocation via async_post_mcp_tool_call_hook
+    # and emits a tool_call span tagged with the caller's virtual-key alias.
+    # Tools surface at GET /mcp; access is brokered by virtual key / team.
+    mcp_servers:
+      # GitHub's hosted remote MCP. Real devils-council use case: read repo/PR
+      # state to scrutinize code (e.g. diff local-unpushed against origin). The
+      # PAT is resolved from the gateway env (k8s secret cottonmouth-github-mcp),
+      # never baked into this ConfigMap — LiteLLM resolves os.environ/ recursively.
+      github:
+        url: https://api.githubcopilot.com/mcp/
+        transport: http
+        auth_type: bearer_token
+        auth_value: os.environ/GITHUB_MCP_TOKEN
+        description: GitHub read-only repo/PR tools for code scrutiny (devils-council).
+        # Grant every virtual key access to this server (e.g. devils-council and
+        # future Cursor agents). LiteLLM still gates access at the gateway and
+        # records allow/deny; CottonMouth observes and attributes by key alias.
+        # Per-key object-permission scoping is enterprise-gated in this build
+        # (returns 403), so allow_all_keys is the open-source access lever.
+        allow_all_keys: true

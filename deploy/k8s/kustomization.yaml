@@ -9,12 +9,15 @@ resources:
   - configmap.yaml
   - backend.yaml
   - web.yaml
-  - sample-agent.yaml
-  - real-agent.yaml
   - postgres.yaml
   - litellm-config.yaml
   - litellm.yaml
-  - litellm-agent.yaml
+  # Demo/load agents — disabled to keep the dashboard focused on real gateway
+  # traffic (e.g. devils-council via the MCP/LLM gateway). Re-enable to generate
+  # synthetic activity:
+  #   - sample-agent.yaml
+  #   - real-agent.yaml
+  #   - litellm-agent.yaml
   # Enable only when the cluster has the AWS Load Balancer Controller. Left out
   # for the sandbox deploy (access via `kubectl port-forward`) to avoid leaving
   # an orphaned ALB behind the cluster's TTL.
@@ -32,10 +35,10 @@ resources:
 images:
   - name: cottonmouth-backend
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-backend
-    newTag: v16
+    newTag: v17
   - name: cottonmouth-web
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-web
-    newTag: v8
+    newTag: v9
   - name: cottonmouth-litellm
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-litellm
-    newTag: v3
+    newTag: v5

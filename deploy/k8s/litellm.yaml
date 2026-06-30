@@ -65,6 +65,18 @@ spec:
                   key: database-url
             - name: STORE_MODEL_IN_DB
               value: "True"
+            # GitHub MCP auth: a read-only fine-grained PAT the gateway forwards as
+            # `Authorization: Bearer` to GitHub's hosted MCP. Resolved into the
+            # github mcp_server's auth_value (os.environ/GITHUB_MCP_TOKEN). Stored
+            # in a Secret created out-of-band (not committed):
+            #   kubectl -n cottonmouth create secret generic cottonmouth-github-mcp \
+            #     --from-literal=token=github_pat_xxx
+            - name: GITHUB_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cottonmouth-github-mcp
+                  key: token
+                  optional: true
           # Bedrock creds for the gateway. In this sandbox IAM role creation is
           # blocked by an SCP, so the gateway uses short-lived creds from a Secret.
           # Where IRSA is available, drop this and annotate the ServiceAccount.
