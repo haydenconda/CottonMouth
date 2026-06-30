@@ -272,6 +272,151 @@ def test_origin_capture(capture):
     assert "host" in origin and "pid" in origin
 
 
+# --- MCP gateway tool calls -------------------------------------------------
+
+
+def _mcp_meta(**over):
+    meta = {
+        "name": "list_prs",
+        "namespaced_tool_name": "github/list_prs",
+        "arguments": {"repo": "acme/widgets"},
+        "result": {"isError": False, "content": [{"type": "text", "text": "3 open PRs"}]},
+        "mcp_server_name": "github",
+        "mcp_session_id": "sess-1",
+    }
+    meta.update(over)
+    return meta
+
+
+def _mcp_kwargs(mcp=None, **over):
+    base = {
+        "litellm_call_id": "mcp-call-1",
+        "litellm_params": {"metadata": {"user_api_key_alias": "devils-council"}},
+        "standard_logging_object": {"id": "slo-1", "mcp_tool_call_metadata": mcp or _mcp_meta()},
+    }
+    base.update(over)
+    return base
+
+
+def _tool_calls(capture):
+    return [s for s in capture.spans if s.span_type == "tool_call"]
+
+
+def _run_mcp_hook(logger, kwargs, start, end):
+    import asyncio
+    asyncio.run(logger.async_post_mcp_tool_call_hook(kwargs, None, start, end))
+
+
+def test_mcp_tool_call_span_mapping(capture):
+    logger = CottonmouthLogger()
+    start, end = _times(80)
+    _run_mcp_hook(logger, _mcp_kwargs(), start, end)
+
+    tools = _tool_calls(capture)
+    assert len(tools) == 1
+    s = tools[0]
+    assert s.span_type == "tool_call"
+    assert s.tool_name == "github/list_prs"
+    assert s.tool_input == {"repo": "acme/widgets"}
+    assert s.tool_output["content"][0]["text"] == "3 open PRs"
+    assert s.agent_name == "devils-council"
+    assert s.duration_ms == 80
+    assert s.metadata["source"] == "litellm-mcp"
+    assert s.metadata["mcp_server"] == "github"
+
+
+def test_mcp_allow_verdict_nested_under_tool_call(capture):
+    logger = CottonmouthLogger()
+    start, end = _times()
+    _run_mcp_hook(logger, _mcp_kwargs(), start, end)
+    tool = _tool_calls(capture)[0]
+    pcs = _perm_checks(capture)
+    assert len(pcs) == 1
+    assert pcs[0].permission_result == "allow"
+    assert pcs[0].permission_policy == "litellm-mcp"
+    assert pcs[0].parent_span_id == tool.span_id  # nests under the call it authorized
+
+
+def test_mcp_session_grouping_when_uncorrelated(capture):
+    logger = CottonmouthLogger()
+    start, end = _times()
+    _run_mcp_hook(logger, _mcp_kwargs(), start, end)
+    s = _tool_calls(capture)[0]
+    assert s.trace_id == "mcp-sess-1"
+    assert s.metadata["correlated"] is False
+
+
+def test_mcp_correlation_via_cottonmouth_metadata(capture):
+    logger = CottonmouthLogger()
+    start, end = _times()
+    kwargs = _mcp_kwargs(
+        litellm_params={"metadata": {"cottonmouth": {
+            "trace_id": "T", "parent_span_id": "P", "agent_name": "devils-council"}}}
+    )
+    _run_mcp_hook(logger, kwargs, start, end)
+    s = _tool_calls(capture)[0]
+    assert s.trace_id == "T"
+    assert s.parent_span_id == "P"
+    assert s.metadata["correlated"] is True
+
+
+def test_mcp_deny_on_permission_error(capture):
+    logger = CottonmouthLogger()
+    start, end = _times()
+    mcp = _mcp_meta(
+        name="delete_repo",
+        namespaced_tool_name="github/delete_repo",
+        arguments={"repo": "acme/widgets"},
+        result={"isError": True, "content": [
+            {"type": "text", "text": "tool not permitted for this key"}]},
+        mcp_session_id="s2",
+    )
+    _run_mcp_hook(logger, _mcp_kwargs(mcp=mcp), start, end)
+
+    tool = _tool_calls(capture)[0]
+    assert tool.status == "failed"
+    assert "not permitted" in tool.error
+    pc = _perm_checks(capture)[0]
+    assert pc.permission_result == "deny"
+    assert pc.permission_policy == "litellm-mcp:mcp-access"
+
+
+def test_mcp_plain_tool_error_no_verdict(capture):
+    """A tool that errors for non-governance reasons is a failed tool_call only."""
+    logger = CottonmouthLogger()
+    start, end = _times()
+    mcp = _mcp_meta(result={"isError": True, "content": [
+        {"type": "text", "text": "upstream timeout contacting github"}]})
+    _run_mcp_hook(logger, _mcp_kwargs(mcp=mcp), start, end)
+    assert _tool_calls(capture)[0].status == "failed"
+    assert _perm_checks(capture) == []
+
+
+def test_mcp_never_emits_llm_call_and_dedupes_across_paths(capture):
+    """An MCP event must map to a tool_call (not a mislabeled llm_call), and be
+    captured exactly once even if both the standard path and the dedicated hook
+    fire for the same call."""
+    logger = CottonmouthLogger()
+    start, end = _times()
+    kwargs = _mcp_kwargs()
+    logger.log_success_event(kwargs, None, start, end)   # standard logging path
+    _run_mcp_hook(logger, kwargs, start, end)            # dedicated MCP hook
+    assert capture.llm_calls() == []
+    assert len(_tool_calls(capture)) == 1                # deduped
+    assert len(_perm_checks(capture)) == 1
+
+
+def test_mcp_management_ops_produce_no_span(capture):
+    """list_tools / management ops traverse the success path with an mcp call_type
+    but no tool metadata — they must NOT become a misleading llm_call span."""
+    logger = CottonmouthLogger()
+    start, end = _times()
+    kwargs = _kwargs(model="MCP: list_tools", call_type="call_mcp_tool",
+                     standard_logging_object={"id": "mgmt-1"}, litellm_call_id="mgmt-1")
+    logger.log_success_event(kwargs, None, start, end)
+    assert capture.spans == []
+
+
 def test_router_async_smoke(capture):
     """Guards LiteLLM #8842: Router async traffic must still fire our callback."""
     import asyncio

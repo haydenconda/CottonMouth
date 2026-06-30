@@ -113,34 +113,46 @@ def _is_gateway_llm_call(s: dict) -> bool:
     )
 
 
+def _is_gateway_tool_call(s: dict) -> bool:
+    """An MCP tool call brokered by the gateway (CORE-10641): what the agent DID."""
+    return (
+        s.get("span_type") == "tool_call"
+        and str((s.get("metadata") or {}).get("source", "")).startswith("litellm-mcp")
+    )
+
+
 def compute_gateway_agent_stats(spans: list[dict]) -> list[dict]:
     """Roll up agents seen ONLY through the LiteLLM gateway (no agent_run).
 
     One entry per agent identity (the virtual-key alias the gateway reported),
-    aggregating model usage, tokens, cost, and the gateway's allow/deny verdicts.
+    aggregating BOTH what it said (model ``llm_call``s) and what it DID (MCP
+    ``tool_call``s), plus tokens, cost, and the gateway's allow/deny verdicts.
+    An agent that only ever calls MCP tools (no model calls) still shows up.
     """
     run_agents = _run_agent_names(spans)
     accs: dict[str, dict] = {}
+
+    def _get(name: str) -> dict:
+        acc = accs.get(name)
+        if acc is None:
+            acc = accs[name] = {
+                "calls": 0, "tool_calls": 0, "cost": 0.0, "in_tok": 0, "out_tok": 0,
+                "failed": 0, "denied": 0, "ms": 0, "models": set(), "tools": set(),
+                "first": None, "last": None,
+            }
+        return acc
+
     for s in spans:
-        if not _is_gateway_llm_call(s):
+        is_llm = _is_gateway_llm_call(s)
+        is_tool = _is_gateway_tool_call(s)
+        if not (is_llm or is_tool):
             continue
         name = s.get("agent_name")
         if not name or name in run_agents:
             continue
-        acc = accs.get(name)
-        if acc is None:
-            acc = accs[name] = {
-                "calls": 0, "cost": 0.0, "in_tok": 0, "out_tok": 0,
-                "failed": 0, "denied": 0, "ms": 0, "models": set(),
-                "first": None, "last": None,
-            }
-        acc["calls"] += 1
+        acc = _get(name)
         acc["cost"] += s.get("cost_usd", 0) or 0
-        acc["in_tok"] += s.get("input_tokens", 0) or 0
-        acc["out_tok"] += s.get("output_tokens", 0) or 0
         acc["ms"] += s.get("duration_ms", 0) or 0
-        if s.get("model"):
-            acc["models"].add(s["model"])
         if s.get("status") == "failed":
             acc["failed"] += 1
         st = s.get("start_time")
@@ -149,7 +161,18 @@ def compute_gateway_agent_stats(spans: list[dict]) -> list[dict]:
                 acc["first"] = st
             if acc["last"] is None or st > acc["last"]:
                 acc["last"] = st
-    # Gateway verdicts: a denied call is recorded as a permission_check (deny).
+        if is_llm:
+            acc["calls"] += 1
+            acc["in_tok"] += s.get("input_tokens", 0) or 0
+            acc["out_tok"] += s.get("output_tokens", 0) or 0
+            if s.get("model"):
+                acc["models"].add(s["model"])
+        else:
+            acc["tool_calls"] += 1
+            tool = s.get("tool_name") or s.get("name")
+            if tool:
+                acc["tools"].add(tool)
+    # Gateway verdicts: a denied call/tool is recorded as a permission_check (deny).
     for s in spans:
         if (
             s.get("span_type") == "permission_check"
@@ -161,17 +184,21 @@ def compute_gateway_agent_stats(spans: list[dict]) -> list[dict]:
 
 
 def _finalize_gateway(name: str, a: dict) -> dict:
-    calls = a["calls"]
+    # Averages are over total billable activity (model calls + tool calls) so an
+    # MCP-only agent still gets meaningful per-unit numbers.
+    units = a["calls"] + a["tool_calls"]
     return {
         "agent_name": name,
         "kind": "gateway",
-        "call_count": calls,
+        "call_count": a["calls"],
+        "tool_call_count": a["tool_calls"],
         "total_cost_usd": round(a["cost"], 6),
-        "avg_cost_usd": round(a["cost"] / calls, 6) if calls else 0.0,
-        "avg_duration_ms": round(a["ms"] / calls, 1) if calls else 0.0,
+        "avg_cost_usd": round(a["cost"] / units, 6) if units else 0.0,
+        "avg_duration_ms": round(a["ms"] / units, 1) if units else 0.0,
         "input_tokens": a["in_tok"],
         "output_tokens": a["out_tok"],
         "models": sorted(a["models"]),
+        "tools": sorted(a["tools"]),
         "error_count": a["failed"],
         "denied_count": a["denied"],
         "first_seen": a["first"],
@@ -198,22 +225,40 @@ def compute_gateway_agent_detail(agent_name: str, spans: list[dict]) -> dict | N
         if s.get("span_type") == "permission_check" and s.get("parent_span_id")
     }
     calls = []
+    tool_calls = []
     for s in spans:
-        if not _is_gateway_llm_call(s) or s.get("agent_name") != agent_name:
+        if s.get("agent_name") != agent_name:
             continue
-        calls.append({
-            "trace_id": s.get("trace_id", ""),
-            "span_id": s.get("span_id", ""),
-            "model": s.get("model", ""),
-            "input_tokens": s.get("input_tokens", 0) or 0,
-            "output_tokens": s.get("output_tokens", 0) or 0,
-            "cost_usd": round(float(s.get("cost_usd", 0) or 0), 6),
-            "duration_ms": s.get("duration_ms", 0) or 0,
-            "status": s.get("status", ""),
-            "verdict": verdict_by_parent.get(s.get("span_id"), "allow"),
-            "started_at": s.get("start_time", ""),
-        })
+        if _is_gateway_llm_call(s):
+            calls.append({
+                "trace_id": s.get("trace_id", ""),
+                "span_id": s.get("span_id", ""),
+                "model": s.get("model", ""),
+                "input_tokens": s.get("input_tokens", 0) or 0,
+                "output_tokens": s.get("output_tokens", 0) or 0,
+                "cost_usd": round(float(s.get("cost_usd", 0) or 0), 6),
+                "duration_ms": s.get("duration_ms", 0) or 0,
+                "status": s.get("status", ""),
+                "verdict": verdict_by_parent.get(s.get("span_id"), "allow"),
+                "started_at": s.get("start_time", ""),
+            })
+        elif _is_gateway_tool_call(s):
+            md = s.get("metadata") or {}
+            tool_calls.append({
+                "trace_id": s.get("trace_id", ""),
+                "span_id": s.get("span_id", ""),
+                "tool_name": s.get("tool_name") or s.get("name") or "",
+                "server": md.get("mcp_server", ""),
+                "input": s.get("tool_input") or {},
+                "cost_usd": round(float(s.get("cost_usd", 0) or 0), 6),
+                "duration_ms": s.get("duration_ms", 0) or 0,
+                "status": s.get("status", ""),
+                "verdict": verdict_by_parent.get(s.get("span_id"), "allow"),
+                "started_at": s.get("start_time", ""),
+            })
     # newest first
     calls.sort(key=lambda c: c["started_at"], reverse=True)
+    tool_calls.sort(key=lambda c: c["started_at"], reverse=True)
     summary["calls"] = calls[:50]
+    summary["tool_calls"] = tool_calls[:50]
     return summary

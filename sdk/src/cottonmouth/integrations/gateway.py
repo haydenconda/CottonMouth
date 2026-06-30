@@ -18,6 +18,11 @@ _DENIAL_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "model not in allowed", "team not allowed to access", "model_access",
         "no access to model", "key not allowed to access model",
     )),
+    ("mcp-access", (
+        "not allowed to access mcp", "mcp server not allowed",
+        "tool not permitted", "not permitted to call tool", "forbidden tool",
+        "mcp permission", "no access to mcp", "not allowed to access tool",
+    )),
     ("rate-limit", (
         "rate limit", "ratelimiterror", "tpm limit", "rpm limit",
         "rate_limit", "max parallel requests", "too many requests",

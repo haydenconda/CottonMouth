@@ -2,11 +2,17 @@
 
 LiteLLM (the open-source LLM gateway) gets your requests to the model and
 enforces the gateway-level controls — model access, budgets, rate limits,
-guardrails — via virtual keys. CottonMouth does **not** duplicate that. This
-module provides a ``CustomLogger`` that turns every completed LiteLLM call into a
-CottonMouth ``llm_call`` span (model, tokens, cost, latency, origin) and, when
-the gateway *rejects* a call, records the gateway's own verdict as a
-``permission_check`` — observing enforcement, not re-implementing it.
+guardrails, MCP tool access — via virtual keys. CottonMouth does **not**
+duplicate that. This module provides a ``CustomLogger`` that turns every
+completed LiteLLM call into a CottonMouth span and records the gateway's own
+verdicts, observing enforcement rather than re-implementing it:
+
+* model calls -> ``llm_call`` span (model, tokens, cost, latency, origin)
+* MCP gateway tool calls -> ``tool_call`` span (tool, args, result, latency,
+  identity) via LiteLLM's ``async_post_mcp_tool_call_hook`` — this is what makes
+  a gateway-only agent's *actions* (not just its model traffic) observable.
+* a gateway allow/deny -> a ``permission_check`` nested under the call it
+  authorized.
 
 Works in both LiteLLM modes:
 
@@ -33,6 +39,7 @@ context is available, resolved in three tiers:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -234,6 +241,69 @@ def _identity_agent_name(kwargs: dict[str, Any], slo: dict[str, Any]) -> str:
     return "litellm-gateway"
 
 
+# ---- MCP tool calls (LiteLLM MCP gateway) -------------------------------
+#
+# LiteLLM's MCP gateway records each tool invocation as a ``StandardLoggingMCPToolCall``
+# (name, arguments, result, mcp_server_name, namespaced_tool_name, mcp_server_cost_info,
+# mcp_session_id) and surfaces it via ``async_post_mcp_tool_call_hook`` and the standard
+# logging payload's ``mcp_tool_call_metadata``. We map that to a ``tool_call`` span.
+
+
+def _mcp_tool_call(kwargs: dict[str, Any], response_obj: Any = None) -> dict[str, Any]:
+    """Extract the MCP tool-call metadata for this event, or ``{}`` if not MCP.
+
+    Defensive about where LiteLLM puts it (the standard logging object, the raw
+    kwargs, or the post-call response object), since the exact carrier differs
+    between the dedicated MCP hook and the standard success-event path.
+    """
+    kwargs = kwargs or {}
+    slo = kwargs.get("standard_logging_object")
+    if isinstance(slo, dict):
+        m = slo.get("mcp_tool_call_metadata")
+        if isinstance(m, dict) and m:
+            return m
+    m = kwargs.get("mcp_tool_call_metadata")
+    if isinstance(m, dict) and m:
+        return m
+    ro = _as_dict(response_obj)
+    m = ro.get("mcp_tool_call_metadata")
+    if isinstance(m, dict) and m:
+        return m
+    return {}
+
+
+def _mcp_failed(mcp: dict[str, Any]) -> bool:
+    """An MCP CallToolResult sets ``isError`` when the tool itself failed/denied."""
+    res = mcp.get("result")
+    return isinstance(res, dict) and bool(res.get("isError"))
+
+
+def _mcp_error_text(mcp: dict[str, Any]) -> str:
+    """Flatten an MCP error result's text content for denial classification."""
+    res = mcp.get("result")
+    if not isinstance(res, dict):
+        return ""
+    content = res.get("content")
+    if isinstance(content, list):
+        parts = [str(c.get("text", "")) for c in content if isinstance(c, dict)]
+        return " ".join(p for p in parts if p)[:300]
+    return str(content or res.get("error") or "")[:300]
+
+
+def _mcp_output(result: Any) -> dict[str, Any]:
+    """Bound the serialized tool result so a large payload can't bloat a span."""
+    d = result if isinstance(result, dict) else _as_dict(result)
+    if not d:
+        return {}
+    try:
+        s = json.dumps(d, default=str)
+    except Exception:
+        s = str(d)
+    if len(s) > 2000:
+        return {"preview": s[:2000], "truncated": True}
+    return d
+
+
 class CottonmouthLogger(_CustomLogger):
     """Maps completed LiteLLM calls to CottonMouth ``llm_call`` spans.
 
@@ -264,6 +334,22 @@ class CottonmouthLogger(_CustomLogger):
     async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
         self._record(kwargs, response_obj, start_time, end_time, failed=True)
 
+    async def async_post_mcp_tool_call_hook(self, kwargs, response_obj, start_time, end_time):
+        """Capture an MCP gateway tool call as a CottonMouth ``tool_call`` span.
+
+        LiteLLM invokes this for every registered ``CustomLogger`` after a tool
+        runs through the MCP gateway (both the direct ``/mcp`` path and
+        LLM-driven tool use). Returning ``None`` leaves the tool response
+        unmodified — we only observe.
+        """
+        try:
+            mcp = _mcp_tool_call(kwargs, response_obj)
+            if mcp:
+                self._record_mcp(kwargs, mcp, start_time, end_time, failed=_mcp_failed(mcp))
+        except Exception:  # never break the MCP request path
+            log.exception("CottonmouthLogger failed to record an MCP tool_call span")
+        return None
+
     # Streaming: deliberately NOT handled per-chunk. LiteLLM fires a single
     # (async_)log_success_event at stream end with the aggregated response, so we
     # emit exactly one span per call instead of one span per token.
@@ -272,12 +358,27 @@ class CottonmouthLogger(_CustomLogger):
 
     def _record(self, kwargs, response_obj, start_time, end_time, *, failed: bool) -> None:
         try:
+            # An MCP tool call can also surface on the standard logging path; map it
+            # to a tool_call span (not a mislabeled llm_call). _record_mcp dedupes
+            # against the dedicated hook so we emit exactly one span either way.
+            mcp = _mcp_tool_call(kwargs, response_obj)
+            if mcp:
+                self._record_mcp(kwargs, mcp, start_time, end_time,
+                                 failed=failed or _mcp_failed(mcp))
+                return
             span = self._build_span(kwargs, response_obj, start_time, end_time, failed)
             if span is not None:
                 get_exporter().export(span)
                 self._emit_gateway_decision(span)
         except Exception:  # never break the LiteLLM request path
             log.exception("CottonmouthLogger failed to record a span")
+
+    def _record_mcp(self, kwargs, mcp, start_time, end_time, *, failed: bool) -> None:
+        span = self._build_mcp_span(kwargs, mcp, start_time, end_time, failed)
+        if span is None:
+            return  # duplicate (already captured via the other path)
+        get_exporter().export(span)
+        self._emit_mcp_decision(span)
 
     def _emit_gateway_decision(self, llm_span: Span) -> None:
         """Record the GATEWAY's verdict for this call as a permission_check.
@@ -318,6 +419,110 @@ class CottonmouthLogger(_CustomLogger):
         check.metadata = {"source": "litellm", "enforced_by": "litellm", "reason": reason or ""}
         get_exporter().export(check)
 
+    def _build_mcp_span(self, kwargs, mcp, start_time, end_time, failed: bool) -> Span | None:
+        kwargs = kwargs or {}
+        slo = kwargs.get("standard_logging_object") or {}
+        if not isinstance(slo, dict):
+            slo = {}
+
+        session_id = str(mcp.get("mcp_session_id") or "")
+        tool = str(mcp.get("namespaced_tool_name") or mcp.get("name") or "mcp_tool")
+        server = str(mcp.get("mcp_server_name") or "")
+
+        call_id = str(slo.get("id") or kwargs.get("litellm_call_id")
+                      or f"{session_id}:{tool}")
+        if self._is_duplicate(f"mcp:{call_id}"):
+            return None
+
+        trace_id, parent_span_id, agent_name, correlated = _resolve_context(kwargs)
+        # No owning agent_run? Group a session's tool calls into one trace so the
+        # gateway-only agent reads as a coherent sequence, not N orphan spans.
+        if not correlated and session_id:
+            trace_id = f"mcp-{session_id}"
+        if not agent_name:
+            agent_name = _identity_agent_name(kwargs, slo)
+
+        identity = _call_identity(kwargs, slo)
+        cost = self._mcp_cost(mcp)
+        span = Span(
+            trace_id=trace_id,
+            parent_span_id=parent_span_id,
+            agent_name=agent_name,
+            span_type="tool_call",
+            name=tool,
+            tool_name=tool,
+            tool_input=_as_dict(mcp.get("arguments")),
+            tool_output=_mcp_output(mcp.get("result")),
+            cost_usd=round(float(cost), 6),
+            start_time=self._iso(start_time),
+            end_time=self._iso(end_time),
+            duration_ms=_duration_ms(start_time, end_time),
+            status="failed" if failed else "completed",
+        )
+        span.metadata = {
+            "source": "litellm-mcp",
+            "mcp_server": server,
+            "mcp_session_id": session_id,
+            "correlated": correlated,
+            "litellm_call_id": call_id,
+            "litellm_identity": self._identity_block(kwargs, slo),
+            "origin": self._origin(kwargs, identity, server or "mcp"),
+        }
+        if failed:
+            span.error = (_mcp_error_text(mcp) or "MCP tool call failed")[:300]
+        return span
+
+    def _emit_mcp_decision(self, tool_span: Span) -> None:
+        """Record the gateway's verdict for an MCP tool call as a permission_check.
+
+        Success -> the gateway allowed the tool. A failure the gateway rejected
+        for access reasons -> a deny. A plain tool error (not a governance
+        decision) leaves the failed tool_call span standing on its own.
+        """
+        denied = reason = None
+        if tool_span.status == "failed":
+            is_denial, reason = classify_gateway_denial(tool_span.error or "")
+            if not is_denial:
+                return
+            denied = True
+
+        result = "deny" if denied else "allow"
+        policy = f"litellm-mcp:{reason}" if denied else "litellm-mcp"
+        check = Span(
+            trace_id=tool_span.trace_id,
+            parent_span_id=tool_span.span_id,
+            agent_name=tool_span.agent_name,
+            span_type="permission_check",
+            name=f"gateway {'denied' if denied else 'allowed'} tool: {tool_span.tool_name}",
+            tool_name=tool_span.tool_name,
+            tool_input={
+                "server": tool_span.metadata.get("mcp_server", ""),
+                "resource": tool_span.tool_name,
+            },
+            permission_result=result,
+            permission_policy=policy,
+            start_time=tool_span.start_time,
+            end_time=tool_span.end_time,
+            status="failed" if denied else "completed",
+        )
+        if denied:
+            check.error = (tool_span.error or "")[:300]
+        check.metadata = {"source": "litellm-mcp", "enforced_by": "litellm", "reason": reason or ""}
+        get_exporter().export(check)
+
+    @staticmethod
+    def _mcp_cost(mcp: dict[str, Any]) -> float:
+        info = mcp.get("mcp_server_cost_info")
+        if isinstance(info, dict):
+            for key in ("default_cost_per_query", "cost_per_query", "response_cost"):
+                val = info.get(key)
+                if val is not None:
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        return 0.0
+        return 0.0
+
     def _is_duplicate(self, call_id: str) -> bool:
         if not call_id:
             return False
@@ -336,6 +541,15 @@ class CottonmouthLogger(_CustomLogger):
 
         call_id = str(kwargs.get("litellm_call_id") or slo.get("id") or "")
         if self._is_duplicate(call_id):
+            return None
+
+        # MCP management ops (list_tools, list_prompts, …) traverse the success
+        # path with an mcp call_type but no tool-call metadata. They are not LLM
+        # calls — the actual tool invocations were already routed to _record_mcp —
+        # so don't synthesize a misleading llm_call span for them.
+        call_type = str(kwargs.get("call_type") or slo.get("call_type") or "")
+        model_name = str(kwargs.get("model") or slo.get("model") or "")
+        if "mcp" in call_type.lower() or model_name.startswith("MCP:"):
             return None
 
         trace_id, parent_span_id, agent_name, correlated = _resolve_context(kwargs)
