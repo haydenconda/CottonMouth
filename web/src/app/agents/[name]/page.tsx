@@ -23,7 +23,7 @@ import {
   Network,
   Phone,
   Ban,
-  Coins,
+  Wrench,
 } from "lucide-react";
 
 export default function AgentDetailPage() {
@@ -245,18 +245,30 @@ export default function AgentDetailPage() {
   );
 }
 
+function summarizeArgs(input: unknown): string {
+  if (input == null) return "";
+  if (typeof input === "string") return input.slice(0, 80);
+  try {
+    const s = JSON.stringify(input);
+    return s.length > 80 ? `${s.slice(0, 80)}…` : s;
+  } catch {
+    return "";
+  }
+}
+
 function GatewayAgentView({ agent }: { agent: GatewayAgentDetail }) {
+  const toolCalls = agent.tool_calls ?? [];
   const stats = [
-    { label: "Calls", value: agent.call_count.toLocaleString(), icon: Phone },
+    {
+      label: "Tool Calls",
+      value: (agent.tool_call_count ?? 0).toLocaleString(),
+      icon: Wrench,
+    },
+    { label: "Model Calls", value: agent.call_count.toLocaleString(), icon: Phone },
     {
       label: "Total Cost",
       value: formatCost(agent.total_cost_usd),
       icon: DollarSign,
-    },
-    {
-      label: "Tokens (in / out)",
-      value: `${agent.input_tokens.toLocaleString()} / ${agent.output_tokens.toLocaleString()}`,
-      icon: Coins,
     },
     {
       label: "Gateway Denials",
@@ -291,8 +303,12 @@ function GatewayAgentView({ agent }: { agent: GatewayAgentDetail }) {
             </span>
           </div>
           <p className="text-xs text-zinc-500">
-            {agent.call_count} gateway call{agent.call_count !== 1 && "s"} ·{" "}
-            {agent.models.map((m) => m.split("/").pop()).join(", ") || "—"}
+            {(agent.tool_call_count ?? 0)} MCP tool call
+            {(agent.tool_call_count ?? 0) !== 1 && "s"} · {agent.call_count} model
+            call{agent.call_count !== 1 && "s"}
+            {agent.models.length > 0 && (
+              <> · {agent.models.map((m) => m.split("/").pop()).join(", ")}</>
+            )}
           </p>
         </div>
       </div>
@@ -300,10 +316,11 @@ function GatewayAgentView({ agent }: { agent: GatewayAgentDetail }) {
       {/* Context: what this view does and doesn't show */}
       <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 px-4 py-3 text-xs text-zinc-600">
         Seen only via the LiteLLM gateway (no <code>agent_run</code>). CottonMouth
-        captures every model call — model, tokens, cost, and the gateway&apos;s
-        allow/deny verdict — attributed to this virtual-key identity. Internal
-        decision/tool steps aren&apos;t visible unless routed through the gateway
-        (MCP) or instrumented with the SDK.
+        captures every model call <em>and</em> every MCP tool call routed through
+        the gateway — model/tool, tokens, cost, and the gateway&apos;s allow/deny
+        verdict — attributed to this virtual-key identity. Internal steps that
+        never touch the gateway aren&apos;t visible unless the agent is also
+        instrumented with the SDK.
       </div>
 
       {/* Stats */}
@@ -328,10 +345,86 @@ function GatewayAgentView({ agent }: { agent: GatewayAgentDetail }) {
         ))}
       </div>
 
-      {/* Recent calls */}
+      {/* Tool calls (MCP) — "what it did" */}
+      <div className="rounded-lg border border-zinc-200 bg-white overflow-hidden">
+        <div className="flex items-center gap-2 border-b border-zinc-200 px-4 py-3">
+          <Wrench className="h-4 w-4 text-sky-600" />
+          <h2 className="text-sm font-medium text-zinc-700">Tool Calls (MCP)</h2>
+          <span className="text-xs text-zinc-400">
+            actions brokered through the gateway&apos;s MCP servers
+          </span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-zinc-200 text-xs text-zinc-500">
+                <th className="px-4 py-2.5 text-left font-medium">Tool</th>
+                <th className="px-4 py-2.5 text-left font-medium">Server</th>
+                <th className="px-4 py-2.5 text-left font-medium">Arguments</th>
+                <th className="px-4 py-2.5 text-left font-medium">Verdict</th>
+                <th className="px-4 py-2.5 text-left font-medium">Status</th>
+                <th className="px-4 py-2.5 text-left font-medium">Duration</th>
+                <th className="px-4 py-2.5 text-left font-medium">Started</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-200">
+              {toolCalls.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center text-zinc-400">
+                    No MCP tool calls captured yet
+                  </td>
+                </tr>
+              )}
+              {toolCalls.map((t) => (
+                <tr
+                  key={t.span_id}
+                  className="hover:bg-zinc-100 transition-colors group"
+                >
+                  <td className="px-4 py-2.5">
+                    <Link
+                      href={`/traces/${t.trace_id}`}
+                      className="font-mono text-xs text-zinc-700 group-hover:text-sky-600 transition-colors"
+                    >
+                      {t.tool_name.split("/").pop() || t.tool_name}
+                    </Link>
+                  </td>
+                  <td className="px-4 py-2.5 font-mono text-xs text-zinc-500">
+                    {t.server || "—"}
+                  </td>
+                  <td className="px-4 py-2.5 font-mono text-[11px] text-zinc-500 max-w-xs truncate">
+                    {summarizeArgs(t.input) || "—"}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                        t.verdict === "deny"
+                          ? "border border-red-500/30 bg-red-500/10 text-red-600"
+                          : "border border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
+                      }`}
+                    >
+                      {t.verdict === "deny" ? "denied" : "allowed"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <StatusBadge status={t.status} />
+                  </td>
+                  <td className="px-4 py-2.5 text-zinc-600 tabular-nums">
+                    {formatDuration(t.duration_ms)}
+                  </td>
+                  <td className="px-4 py-2.5 text-zinc-500 tabular-nums">
+                    {t.started_at ? timeAgo(t.started_at) : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Recent model calls */}
       <div className="rounded-lg border border-zinc-200 bg-white overflow-hidden">
         <div className="border-b border-zinc-200 px-4 py-3">
-          <h2 className="text-sm font-medium text-zinc-700">Recent Calls</h2>
+          <h2 className="text-sm font-medium text-zinc-700">Recent Model Calls</h2>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">

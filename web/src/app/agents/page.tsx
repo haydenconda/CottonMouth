@@ -17,6 +17,7 @@ import {
   Network,
   Phone,
   Ban,
+  Wrench,
 } from "lucide-react";
 
 function AgentCardSkeleton() {
@@ -147,8 +148,18 @@ function GatewayAgentCard({ agent }: { agent: GatewayAgentSummary }) {
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded bg-zinc-100 px-3 py-2">
           <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 mb-0.5">
+            <Wrench className="h-3 w-3" />
+            Tool Calls
+          </div>
+          <p className="text-sm font-medium text-zinc-700 tabular-nums">
+            {(agent.tool_call_count ?? 0).toLocaleString()}
+          </p>
+        </div>
+
+        <div className="rounded bg-zinc-100 px-3 py-2">
+          <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 mb-0.5">
             <Phone className="h-3 w-3" />
-            Calls
+            Model Calls
           </div>
           <p className="text-sm font-medium text-zinc-700 tabular-nums">
             {agent.call_count.toLocaleString()}
@@ -178,20 +189,30 @@ function GatewayAgentCard({ agent }: { agent: GatewayAgentSummary }) {
             {agent.denied_count.toLocaleString()}
           </p>
         </div>
-
-        <div className="rounded bg-zinc-100 px-3 py-2">
-          <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 mb-0.5">
-            <Clock className="h-3 w-3" />
-            Last Seen
-          </div>
-          <p className="text-sm font-medium text-zinc-700 tabular-nums">
-            {agent.last_seen ? timeAgo(agent.last_seen) : "—"}
-          </p>
-        </div>
       </div>
 
+      {(agent.tools?.length ?? 0) > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          <Wrench className="h-3 w-3 text-zinc-400" />
+          {agent.tools.slice(0, 6).map((t) => (
+            <span
+              key={t}
+              className="rounded bg-sky-500/10 px-1.5 py-0.5 font-mono text-[10px] text-sky-700"
+            >
+              {t.split("/").pop()}
+            </span>
+          ))}
+          {agent.tools.length > 6 && (
+            <span className="text-[10px] text-zinc-400">
+              +{agent.tools.length - 6}
+            </span>
+          )}
+        </div>
+      )}
+
       {agent.models.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <Phone className="h-3 w-3 text-zinc-400" />
           {agent.models.map((m) => (
             <span
               key={m}
@@ -202,6 +223,10 @@ function GatewayAgentCard({ agent }: { agent: GatewayAgentSummary }) {
           ))}
         </div>
       )}
+
+      <div className="mt-3 text-[10px] text-zinc-400">
+        Last seen {agent.last_seen ? timeAgo(agent.last_seen) : "—"}
+      </div>
     </Link>
   );
 }
@@ -266,7 +291,7 @@ export default function AgentsPage() {
               Gateway agents
             </h2>
             <span className="text-xs text-zinc-500">
-              via LiteLLM · model calls only (no agent_run traces)
+              via LiteLLM · model + MCP tool calls (no agent_run traces)
             </span>
           </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

@@ -185,17 +185,21 @@ export interface AgentsResponse {
   gateway_total?: number;
 }
 
-/** A gateway-only agent: usage rolled up from its llm_call spans. */
+/** A gateway-only agent: usage rolled up from its llm_call + MCP tool_call spans. */
 export interface GatewayAgentSummary {
   agent_name: string;
   kind: "gateway";
   call_count: number;
+  /** MCP tool calls the agent made through the gateway ("what it did"). */
+  tool_call_count: number;
   total_cost_usd: number;
   avg_cost_usd: number;
   avg_duration_ms: number;
   input_tokens: number;
   output_tokens: number;
   models: string[];
+  /** Distinct MCP tools the agent invoked (e.g. "github/get_file_contents"). */
+  tools: string[];
   error_count: number;
   denied_count: number;
   first_seen?: string | null;
@@ -216,8 +220,23 @@ export interface GatewayCall {
   started_at: string;
 }
 
+/** One MCP tool call made through the gateway (for the gateway-agent detail). */
+export interface GatewayToolCall {
+  trace_id: string;
+  span_id: string;
+  tool_name: string;
+  server: string;
+  input: unknown;
+  cost_usd: number;
+  duration_ms: number;
+  status: string;
+  verdict: string;
+  started_at: string;
+}
+
 export interface GatewayAgentDetail extends GatewayAgentSummary {
   calls: GatewayCall[];
+  tool_calls: GatewayToolCall[];
 }
 
 /** Type guard: a gateway-only agent detail vs a run-instrumented one. */
