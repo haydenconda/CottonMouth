@@ -364,6 +364,13 @@ async def handle_ingest_spans(request: web.Request) -> web.Response:
     async with _ingest_lock:
         await asyncio.to_thread(_append_and_rotate, traces_file, lines)
 
+    # Increment the Prometheus counters for each span as it lands. This is the
+    # single ingest chokepoint, so metrics reflect real agent activity over time
+    # (rate()/increase()-friendly) rather than a recomputed window snapshot.
+    from src.common.metrics import record_span
+    for s in spans:
+        record_span(s)
+
     log.info("Ingested %d span(s) -> %s", len(spans), traces_file.name)
     return _json_response({"accepted": len(spans)}, status=202)
 
@@ -714,10 +721,9 @@ async def handle_metrics(_: web.Request) -> web.Response:
     reconcile with the Traces/Agents/Governance views. Scrape target for
     Prometheus / the OpenTelemetry Collector prometheus receiver.
     """
-    from src.common.metrics import render_metrics
+    from src.common.metrics import render
 
-    spans = await asyncio.to_thread(_load_traces_file)
-    body, content_type = await asyncio.to_thread(render_metrics, spans)
+    body, content_type = await asyncio.to_thread(render)
     return web.Response(body=body, headers={"Content-Type": content_type})
 
 
@@ -772,6 +778,20 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/gateway", handle_gateway)
     app.router.add_get("/api/permissions", handle_permissions)
     app.router.add_get("/metrics", handle_metrics)
+
+    # Seed the Prometheus counters once from the existing trace window so /metrics
+    # isn't empty right after a (re)deploy and reconciles with the dashboard's
+    # run count. New spans then increment the same counters as they're ingested.
+    async def _seed_metrics(_: web.Application) -> None:
+        try:
+            from src.common.metrics import seed_from_window
+            spans = await asyncio.to_thread(_load_traces_file)
+            await asyncio.to_thread(seed_from_window, spans)
+            log.info("Seeded metrics counters from %d spans", len(spans))
+        except Exception as exc:
+            log.warning("metrics seed skipped: %s", exc)
+
+    app.on_startup.append(_seed_metrics)
 
     log.info("CottonMouth API routes registered")
     return app

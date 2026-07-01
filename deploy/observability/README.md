@@ -11,35 +11,55 @@ dashboards and Alertmanager rules, instead of being limited to the built-in
 dashboard. The Prometheus exposition format is also what the OpenTelemetry
 Collector's `prometheus` receiver scrapes, so this doubles as the OTel path.
 
-## Important: these are window gauges, not lifetime counters
+## These are real counters — use rate() / increase()
 
-Every metric is recomputed on each scrape from the same **rolling span window**
-the dashboard reads (the most recent ~12k spans). They are exposed as **gauges**
-describing the current window — they are *not* monotonic counters, so do **not**
-wrap them in `rate()` / `increase()`. Alert and graph on the values directly
-(e.g. `cottonmouth_agent_error_rate > 0.1`).
+Metrics are **incremented as spans are ingested**, so the `_total` series are
+proper monotonic Prometheus counters. Graph and alert on them with `rate()`,
+`increase()`, and `histogram_quantile()` — e.g. `sum by (agent) (rate(cottonmouth_agent_runs_total[5m]))`.
+
+Counters **reset to 0 when the backend restarts**; that's expected and
+`rate()`/`increase()` handle counter resets automatically. On startup the
+counters are seeded once from the existing trace window so `/metrics` isn't
+empty right after a (re)deploy. `cottonmouth_up` is a point-in-time gauge.
 
 ## Metrics
 
-| Metric | Labels | Meaning |
-| --- | --- | --- |
-| `cottonmouth_up` | – | 1 while the backend is serving metrics |
-| `cottonmouth_info` | `version` | Build info, value always 1 |
-| `cottonmouth_spans_window` | – | Spans currently in the read window |
-| `cottonmouth_agent_runs` | `agent` | Runs observed in the window |
-| `cottonmouth_agent_errors` | `agent` | Agent-logic run failures (infra excluded) |
-| `cottonmouth_agent_error_rate` | `agent` | Agent-logic error rate, 0–1 |
-| `cottonmouth_agent_infra_failures` | `agent` | Infra failures (expired creds, throttling) |
-| `cottonmouth_agent_run_duration_ms_avg` | `agent` | Avg run duration (ms) |
-| `cottonmouth_agent_cost_usd` | `agent`, `kind` | Cost (USD); `kind` = `run` or `gateway` |
-| `cottonmouth_agent_llm_calls` | `agent`, `kind` | Model calls (gateway agents) |
-| `cottonmouth_agent_tool_calls` | `agent`, `kind` | MCP tool calls (gateway agents) |
-| `cottonmouth_agent_tokens` | `agent`, `kind`, `direction` | Tokens; `direction` = `input`/`output` |
-| `cottonmouth_permission_checks` | `agent`, `result`, `mode` | Authorization checks; `result` = `allow`/`deny`, `mode` = `enforce`/`monitor` |
-| `cottonmouth_permission_checks_total_window` | `result` | Fleet authorization checks by verdict |
-| `cottonmouth_agent_permission_denials` | `agent` | Out-of-compliance actions per agent |
-| `cottonmouth_agent_compliance_ratio` | `agent` | Fraction of an agent's checks that were allowed, 0–1 |
-| `cottonmouth_compliance_ratio` | – | Fleet-wide compliance ratio, 0–1 |
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `cottonmouth_up` | gauge | – | 1 while the backend is serving metrics |
+| `cottonmouth_info` | gauge | `version` | Build info, value always 1 |
+| `cottonmouth_spans_ingested_total` | counter | `span_type`, `agent` | Every span ingested, by type |
+| `cottonmouth_agent_runs_total` | counter | `agent`, `status` | Agent runs; `status` = `completed`/`failed`/`infra_failure` |
+| `cottonmouth_llm_calls_total` | counter | `agent`, `model`, `status` | Model calls |
+| `cottonmouth_tool_calls_total` | counter | `agent`, `status` | MCP tool calls |
+| `cottonmouth_permission_checks_total` | counter | `agent`, `result`, `mode` | Authorization checks; `result` = `allow`/`deny`, `mode` = `enforce`/`monitor` |
+| `cottonmouth_tokens_total` | counter | `agent`, `direction` | Tokens; `direction` = `input`/`output` |
+| `cottonmouth_cost_usd_total` | counter | `agent` | Spend in USD |
+| `cottonmouth_agent_run_duration_seconds` | histogram | `agent` | Run wall-clock duration (use `histogram_quantile` on `_bucket`) |
+
+### Useful queries
+
+```promql
+# Runs per minute by agent
+sum by (agent) (rate(cottonmouth_agent_runs_total[5m])) * 60
+
+# Agent-logic error rate (infra failures excluded)
+sum(rate(cottonmouth_agent_runs_total{status="failed"}[5m]))
+  / clamp_min(sum(rate(cottonmouth_agent_runs_total{status=~"completed|failed"}[5m])), 0.0001)
+
+# Spend rate ($/hr)
+sum by (agent) (rate(cottonmouth_cost_usd_total[5m])) * 3600
+
+# p95 run duration
+histogram_quantile(0.95, sum by (le) (rate(cottonmouth_agent_run_duration_seconds_bucket[5m])))
+
+# Fleet compliance (allow / total)
+sum(cottonmouth_permission_checks_total{result="allow"})
+  / clamp_min(sum(cottonmouth_permission_checks_total), 1)
+
+# Would-block (shadow) denials in the last hour, by agent
+sum by (agent) (increase(cottonmouth_permission_checks_total{result="deny", mode="monitor"}[1h]))
+```
 
 The `mode` label distinguishes **enforce** (the action was blocked) from
 **monitor** (shadow mode: the verdict was recorded but the action proceeded).

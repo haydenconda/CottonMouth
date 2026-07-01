@@ -1,138 +1,167 @@
 """Prometheus / OpenTelemetry metrics for CottonMouth.
 
-Exposes CottonMouth's observability data as Prometheus text-format metrics so
-platform engineers can scrape it into their own Grafana dashboards and build
-Alertmanager rules — instead of being limited to the built-in dashboard.
+Exposes CottonMouth's agent activity as **real Prometheus counters and a
+histogram** so platform engineers can see change over time — ``rate()``,
+``increase()``, cost/hour, error-rate trends, latency percentiles — and build
+Alertmanager rules on top. This is also exactly what the OpenTelemetry
+Collector's ``prometheus`` receiver scrapes, so it doubles as the OTel path.
 
-Everything is derived on each scrape from the same rolling span window the
-dashboard reads (``_load_traces_file``), so the numbers reconcile exactly with
-the Traces / Agents / Governance views. Because the window is a bounded tail
-(not a monotonic lifetime counter), metrics are exposed as **gauges** describing
-the current window; document this for anyone writing ``rate()`` queries.
+Design: metrics are **incremented as spans are ingested** (``record_span``),
+not recomputed from a bounded read window on each scrape. That means the
+numbers behave like proper monotonic counters — they only go up as agents do
+work — instead of being pinned to a fixed tail of recent spans. On startup we
+``seed_from_window`` once from the existing trace window so the counters aren't
+empty after a (re)deploy and reconcile with the dashboard's run count.
 
-The Prometheus exposition format is also what the OpenTelemetry Collector's
-``prometheus`` receiver scrapes, so this doubles as the OTel path.
+Counters reset to 0 when the backend restarts; that's normal — ``rate()`` and
+``increase()`` handle counter resets. Do NOT wrap the ``_total`` series in
+anything that assumes lifetime persistence across restarts.
 """
 from __future__ import annotations
 
-from prometheus_client import CollectorRegistry, Gauge, generate_latest
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 from prometheus_client.exposition import CONTENT_TYPE_LATEST
 
-from src.common.agent_stats import (
-    compute_all_agent_stats,
-    compute_gateway_agent_stats,
+from src.common.agent_stats import is_infra_failure
+
+_VERSION = "0.2.0"
+
+# A dedicated registry so /metrics exposes exactly our series (no default
+# process/GC collectors leaking in and confusing dashboards).
+REGISTRY = CollectorRegistry()
+
+_up = Gauge("cottonmouth_up", "1 if the CottonMouth backend is serving metrics.", registry=REGISTRY)
+_up.set(1)
+_info = Gauge("cottonmouth_info", "Build info (value always 1).", ["version"], registry=REGISTRY)
+_info.labels(version=_VERSION).set(1)
+
+# Every span, by type — the raw firehose count.
+_spans = Counter(
+    "cottonmouth_spans_ingested_total",
+    "Total spans ingested, by span type and agent.",
+    ["span_type", "agent"],
+    registry=REGISTRY,
 )
 
-_VERSION = "0.1.0"
+# Agent runs, split by terminal status. ``failed`` is agent-logic failure;
+# ``infra_failure`` is an environment problem (expired creds, throttling) and is
+# kept separate so it doesn't pollute the error rate — matching the UI.
+_runs = Counter(
+    "cottonmouth_agent_runs_total",
+    "Total agent runs, by agent and terminal status (completed|failed|infra_failure).",
+    ["agent", "status"],
+    registry=REGISTRY,
+)
+
+_llm = Counter(
+    "cottonmouth_llm_calls_total",
+    "Total LLM/model calls, by agent, model and status.",
+    ["agent", "model", "status"],
+    registry=REGISTRY,
+)
+_tool = Counter(
+    "cottonmouth_tool_calls_total",
+    "Total tool (MCP) calls, by agent and status.",
+    ["agent", "status"],
+    registry=REGISTRY,
+)
+_perm = Counter(
+    "cottonmouth_permission_checks_total",
+    "Total authorization checks, by agent, verdict (allow|deny) and enforcement mode (enforce|monitor).",
+    ["agent", "result", "mode"],
+    registry=REGISTRY,
+)
+_tokens = Counter(
+    "cottonmouth_tokens_total",
+    "Total model tokens processed, by agent and direction (input|output).",
+    ["agent", "direction"],
+    registry=REGISTRY,
+)
+_cost = Counter(
+    "cottonmouth_cost_usd_total",
+    "Total spend in USD, by agent.",
+    ["agent"],
+    registry=REGISTRY,
+)
+
+# Wall-clock run duration -> p50/p90/p95/p99 via histogram_quantile().
+_run_duration = Histogram(
+    "cottonmouth_agent_run_duration_seconds",
+    "Agent run wall-clock duration in seconds.",
+    ["agent"],
+    buckets=(0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600),
+    registry=REGISTRY,
+)
 
 
-def _permission_breakdown(spans: list[dict]) -> tuple[dict, dict, dict]:
-    """Aggregate permission_check spans.
+def _agent(span: dict) -> str:
+    return span.get("agent_name") or "unknown"
 
-    Returns:
-        by_agent_result_mode: {(agent, result, mode): count}
-        agent_totals: {agent: {"allow": n, "deny": n}}
-        fleet: {"allow": n, "deny": n}
-    """
-    by_key: dict[tuple[str, str, str], int] = {}
-    agent_totals: dict[str, dict[str, int]] = {}
-    fleet = {"allow": 0, "deny": 0}
+
+def _num(v) -> float:
+    return v if isinstance(v, (int, float)) else 0.0
+
+
+def record_span(span: dict) -> None:
+    """Increment metrics for a single ingested span. Never raises — metrics must
+    not be able to break the ingest path."""
+    try:
+        st = span.get("span_type") or "unknown"
+        agent = _agent(span)
+        _spans.labels(span_type=st, agent=agent).inc()
+
+        if st == "agent_run":
+            status = span.get("status")
+            if status in ("completed", "failed"):
+                if status == "failed":
+                    bucket = "infra_failure" if is_infra_failure(span.get("error", "")) else "failed"
+                else:
+                    bucket = "completed"
+                _runs.labels(agent=agent, status=bucket).inc()
+                dur_ms = _num(span.get("duration_ms"))
+                if dur_ms > 0:
+                    _run_duration.labels(agent=agent).observe(dur_ms / 1000.0)
+
+        elif st == "llm_call":
+            _llm.labels(agent=agent, model=span.get("model") or "unknown",
+                        status=span.get("status") or "unknown").inc()
+            it, ot = _num(span.get("input_tokens")), _num(span.get("output_tokens"))
+            if it:
+                _tokens.labels(agent=agent, direction="input").inc(it)
+            if ot:
+                _tokens.labels(agent=agent, direction="output").inc(ot)
+            cost = _num(span.get("cost_usd"))
+            if cost:
+                _cost.labels(agent=agent).inc(cost)
+
+        elif st == "tool_call":
+            _tool.labels(agent=agent, status=span.get("status") or "unknown").inc()
+            cost = _num(span.get("cost_usd"))
+            if cost:
+                _cost.labels(agent=agent).inc(cost)
+
+        elif st == "permission_check":
+            result = "deny" if span.get("permission_result") == "deny" else "allow"
+            mode = span.get("permission_mode") or "enforce"
+            _perm.labels(agent=agent, result=result, mode=mode).inc()
+    except Exception:
+        pass
+
+
+_seeded = False
+
+
+def seed_from_window(spans: list[dict]) -> None:
+    """One-time seed of the counters from the existing trace window so metrics
+    aren't empty right after a (re)deploy. Idempotent per process."""
+    global _seeded
+    if _seeded:
+        return
+    _seeded = True
     for s in spans:
-        if s.get("span_type") != "permission_check":
-            continue
-        agent = s.get("agent_name") or "unknown"
-        result = "deny" if s.get("permission_result") == "deny" else "allow"
-        mode = s.get("permission_mode") or "enforce"
-        by_key[(agent, result, mode)] = by_key.get((agent, result, mode), 0) + 1
-        at = agent_totals.setdefault(agent, {"allow": 0, "deny": 0})
-        at[result] += 1
-        fleet[result] += 1
-    return by_key, agent_totals, fleet
+        record_span(s)
 
 
-def render_metrics(spans: list[dict]) -> tuple[bytes, str]:
-    """Compute the full metric set from ``spans`` and return (body, content_type)."""
-    reg = CollectorRegistry()
-
-    up = Gauge("cottonmouth_up", "1 if the CottonMouth backend is serving metrics.", registry=reg)
-    up.set(1)
-    info = Gauge("cottonmouth_info", "Build info (value always 1).", ["version"], registry=reg)
-    info.labels(version=_VERSION).set(1)
-    window = Gauge(
-        "cottonmouth_spans_window",
-        "Number of spans in the current rolling read window.",
-        registry=reg,
-    )
-    window.set(len(spans))
-
-    # --- Per run-instrumented agent (multi-span agent_run traces) ---
-    g_runs = Gauge("cottonmouth_agent_runs", "Agent runs observed in the window.", ["agent"], registry=reg)
-    g_run_err = Gauge("cottonmouth_agent_errors", "Agent-logic run failures in the window (infra failures excluded).", ["agent"], registry=reg)
-    g_err_rate = Gauge("cottonmouth_agent_error_rate", "Agent-logic error rate over the window (0-1).", ["agent"], registry=reg)
-    g_infra = Gauge("cottonmouth_agent_infra_failures", "Infrastructure failures (expired creds, throttling) in the window.", ["agent"], registry=reg)
-    g_dur = Gauge("cottonmouth_agent_run_duration_ms_avg", "Average agent run duration (ms) over the window.", ["agent"], registry=reg)
-
-    # --- Cost / tokens / activity (agent + kind) ---
-    g_cost = Gauge("cottonmouth_agent_cost_usd", "Total cost (USD) attributed to the agent in the window.", ["agent", "kind"], registry=reg)
-    g_llm = Gauge("cottonmouth_agent_llm_calls", "LLM/model calls in the window.", ["agent", "kind"], registry=reg)
-    g_tool = Gauge("cottonmouth_agent_tool_calls", "Tool (MCP) calls in the window.", ["agent", "kind"], registry=reg)
-    g_tokens = Gauge("cottonmouth_agent_tokens", "Tokens in the window.", ["agent", "kind", "direction"], registry=reg)
-
-    run_stats = compute_all_agent_stats(spans)
-    for a in run_stats:
-        name = a["agent_name"]
-        g_runs.labels(agent=name).set(a["total_runs"])
-        g_run_err.labels(agent=name).set(a["error_count"])
-        g_err_rate.labels(agent=name).set(a["error_rate"])
-        g_infra.labels(agent=name).set(a.get("infra_failure_count", 0))
-        g_dur.labels(agent=name).set(a["avg_duration_ms"])
-        g_cost.labels(agent=name, kind="run").set(a["total_cost_usd"])
-
-    gw_stats = compute_gateway_agent_stats(spans)
-    for a in gw_stats:
-        name = a["agent_name"]
-        g_cost.labels(agent=name, kind="gateway").set(a["total_cost_usd"])
-        g_llm.labels(agent=name, kind="gateway").set(a["call_count"])
-        g_tool.labels(agent=name, kind="gateway").set(a["tool_call_count"])
-        g_tokens.labels(agent=name, kind="gateway", direction="input").set(a["input_tokens"])
-        g_tokens.labels(agent=name, kind="gateway", direction="output").set(a["output_tokens"])
-
-    # --- Governance / compliance (permission_check spans) ---
-    g_perm = Gauge(
-        "cottonmouth_permission_checks",
-        "Authorization checks in the window, by agent / verdict / enforcement mode.",
-        ["agent", "result", "mode"],
-        registry=reg,
-    )
-    g_denials = Gauge("cottonmouth_agent_permission_denials", "Denied (out-of-compliance) actions per agent in the window.", ["agent"], registry=reg)
-    g_agent_compliance = Gauge(
-        "cottonmouth_agent_compliance_ratio",
-        "Fraction of an agent's authorization checks that were allowed (0-1).",
-        ["agent"],
-        registry=reg,
-    )
-    g_fleet_compliance = Gauge(
-        "cottonmouth_compliance_ratio",
-        "Fleet-wide fraction of authorization checks that were allowed (0-1).",
-        registry=reg,
-    )
-    g_fleet_checks = Gauge(
-        "cottonmouth_permission_checks_total_window",
-        "Total authorization checks in the window, by verdict.",
-        ["result"],
-        registry=reg,
-    )
-
-    by_key, agent_totals, fleet = _permission_breakdown(spans)
-    for (agent, result, mode), count in by_key.items():
-        g_perm.labels(agent=agent, result=result, mode=mode).set(count)
-    for agent, tot in agent_totals.items():
-        total = tot["allow"] + tot["deny"]
-        g_denials.labels(agent=agent).set(tot["deny"])
-        g_agent_compliance.labels(agent=agent).set(round(tot["allow"] / total, 4) if total else 1.0)
-    fleet_total = fleet["allow"] + fleet["deny"]
-    g_fleet_checks.labels(result="allow").set(fleet["allow"])
-    g_fleet_checks.labels(result="deny").set(fleet["deny"])
-    g_fleet_compliance.set(round(fleet["allow"] / fleet_total, 4) if fleet_total else 1.0)
-
-    return generate_latest(reg), CONTENT_TYPE_LATEST
+def render() -> tuple[bytes, str]:
+    """Return (body, content_type) for the /metrics response."""
+    return generate_latest(REGISTRY), CONTENT_TYPE_LATEST

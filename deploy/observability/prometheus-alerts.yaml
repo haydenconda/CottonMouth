@@ -4,8 +4,10 @@
 # is the "bring your own alerting stack" path; CottonMouth also ships a built-in
 # Slack webhook for teams that don't run Prometheus (see docs/ALERTING.md).
 #
-# NOTE: CottonMouth metrics are rolling-window gauges, so alert on the values
-# directly — do not use rate()/increase().
+# CottonMouth metrics are proper Prometheus counters (the `_total` series) plus a
+# few point-in-time gauges (`cottonmouth_up`). Use rate()/increase() on the
+# counters. Counters reset to 0 on backend restart — rate()/increase() handle
+# that automatically.
 #
 # For the Prometheus Operator, wrap these in a PrometheusRule CR. Plain
 # Prometheus can load this file directly via rule_files.
@@ -22,46 +24,45 @@ groups:
           description: "No successful /metrics scrape for 5m."
 
       - alert: CottonMouthAgentHighErrorRate
-        expr: cottonmouth_agent_error_rate > 0.1
+        expr: |
+          sum by (agent) (rate(cottonmouth_agent_runs_total{status="failed"}[15m]))
+            /
+          clamp_min(sum by (agent) (rate(cottonmouth_agent_runs_total{status=~"completed|failed"}[15m])), 0.0001)
+            > 0.1
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "High error rate for agent {{ $labels.agent }}"
-          description: "{{ $labels.agent }} agent-logic error rate is {{ $value | humanizePercentage }} over the window."
+          description: "{{ $labels.agent }} agent-logic error rate is {{ $value | humanizePercentage }} over 15m (infra failures excluded)."
 
       - alert: CottonMouthAgentCostSpike
-        expr: cottonmouth_agent_cost_usd > 5
+        expr: sum by (agent) (rate(cottonmouth_cost_usd_total[5m])) * 3600 > 5
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Cost spike for agent {{ $labels.agent }} ({{ $labels.kind }})"
-          description: "{{ $labels.agent }} has accrued ${{ $value }} in the current window."
+          summary: "Cost spike for agent {{ $labels.agent }}"
+          description: "{{ $labels.agent }} is spending ${{ $value | printf \"%.2f\" }}/hr."
 
       - alert: CottonMouthComplianceDrop
-        expr: cottonmouth_compliance_ratio < 0.9
+        expr: |
+          sum(rate(cottonmouth_permission_checks_total{result="allow"}[15m]))
+            /
+          clamp_min(sum(rate(cottonmouth_permission_checks_total[15m])), 0.0001)
+            < 0.9
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "Fleet policy compliance below 90%"
-          description: "Fleet compliance ratio is {{ $value | humanizePercentage }} (allowed / total authorization checks)."
-
-      - alert: CottonMouthAgentOutOfCompliance
-        expr: cottonmouth_agent_compliance_ratio < 0.8
-        for: 15m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Agent {{ $labels.agent }} frequently out of compliance"
-          description: "{{ $labels.agent }} compliance ratio is {{ $value | humanizePercentage }}."
+          description: "Fleet compliance is {{ $value | humanizePercentage }} (allowed / total authorization checks over 15m)."
 
       - alert: CottonMouthDenialSurge
-        expr: cottonmouth_agent_permission_denials > 20
+        expr: sum by (agent) (increase(cottonmouth_permission_checks_total{result="deny"}[1h])) > 20
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "Permission-denial surge for agent {{ $labels.agent }}"
-          description: "{{ $labels.agent }} has {{ $value }} denied actions in the current window."
+          description: "{{ $labels.agent }} has {{ $value }} denied actions in the last hour."
