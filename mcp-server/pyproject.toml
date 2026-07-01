@@ -1,0 +1,19 @@
+[project]
+name = "cottonmouth-mcp"
+version = "0.1.0"
+description = "MCP server for CottonMouth — query traces, agents, governance/compliance, and metrics from any MCP client (Cursor, Claude, etc.)"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+cottonmouth-mcp = "cottonmouth_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cottonmouth_mcp"]

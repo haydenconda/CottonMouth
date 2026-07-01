@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "cottonmouth": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "/absolute/path/to/mole/mcp-server",
+        "cottonmouth-mcp"
+      ],
+      "env": {
+        "COTTONMOUTH_ENDPOINT": "http://localhost:8150"
+      }
+    }
+  }
+}
