@@ -1,0 +1,27 @@
+# Public entry point for the dashboard WITHOUT the AWS Load Balancer Controller.
+# EKS's managed cloud-controller-manager provisions a Classic ELB for a
+# Service type=LoadBalancer out of the box, giving a shareable public hostname.
+#
+# NOTE: this exposes the dashboard publicly with NO authentication. Fine for a
+# short-lived sandbox demo; restrict with loadBalancerSourceRanges or front with
+# auth/TLS before any real use. Prefer the ALB Ingress (ingress.yaml) once the
+# aws-load-balancer-controller is installed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cottonmouth-web-lb
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    app.kubernetes.io/component: web
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  # Uncomment to limit who can reach the demo:
+  # loadBalancerSourceRanges:
+  #   - 0.0.0.0/0
