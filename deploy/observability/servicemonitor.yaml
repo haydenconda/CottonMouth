@@ -1,0 +1,20 @@
+# Prometheus Operator ServiceMonitor for the CottonMouth backend.
+# Requires the prometheus-operator CRDs. Adjust the release label selector to
+# match your Prometheus instance's serviceMonitorSelector.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cottonmouth-backend
+  namespace: cottonmouth
+  labels:
+    app.kubernetes.io/part-of: cottonmouth
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: cottonmouth
+      app.kubernetes.io/component: backend
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

@@ -1,0 +1,67 @@
+# Example Prometheus alerting rules built from CottonMouth metrics.
+#
+# These route through your existing Alertmanager (Slack, PagerDuty, etc.). This
+# is the "bring your own alerting stack" path; CottonMouth also ships a built-in
+# Slack webhook for teams that don't run Prometheus (see docs/ALERTING.md).
+#
+# NOTE: CottonMouth metrics are rolling-window gauges, so alert on the values
+# directly — do not use rate()/increase().
+#
+# For the Prometheus Operator, wrap these in a PrometheusRule CR. Plain
+# Prometheus can load this file directly via rule_files.
+groups:
+  - name: cottonmouth.rules
+    rules:
+      - alert: CottonMouthBackendDown
+        expr: cottonmouth_up != 1 or absent(cottonmouth_up)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CottonMouth backend is not exporting metrics"
+          description: "No successful /metrics scrape for 5m."
+
+      - alert: CottonMouthAgentHighErrorRate
+        expr: cottonmouth_agent_error_rate > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate for agent {{ $labels.agent }}"
+          description: "{{ $labels.agent }} agent-logic error rate is {{ $value | humanizePercentage }} over the window."
+
+      - alert: CottonMouthAgentCostSpike
+        expr: cottonmouth_agent_cost_usd > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cost spike for agent {{ $labels.agent }} ({{ $labels.kind }})"
+          description: "{{ $labels.agent }} has accrued ${{ $value }} in the current window."
+
+      - alert: CottonMouthComplianceDrop
+        expr: cottonmouth_compliance_ratio < 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fleet policy compliance below 90%"
+          description: "Fleet compliance ratio is {{ $value | humanizePercentage }} (allowed / total authorization checks)."
+
+      - alert: CottonMouthAgentOutOfCompliance
+        expr: cottonmouth_agent_compliance_ratio < 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent {{ $labels.agent }} frequently out of compliance"
+          description: "{{ $labels.agent }} compliance ratio is {{ $value | humanizePercentage }}."
+
+      - alert: CottonMouthDenialSurge
+        expr: cottonmouth_agent_permission_denials > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Permission-denial surge for agent {{ $labels.agent }}"
+          description: "{{ $labels.agent }} has {{ $value }} denied actions in the current window."

@@ -1,0 +1,128 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus data source scraping the CottonMouth /metrics endpoint",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["cottonmouth", "agent-observability"],
+  "title": "CottonMouth — Agent Observability",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "agent",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(cottonmouth_agent_cost_usd, agent)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Fleet compliance",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1,
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "red", "value": null },
+          { "color": "yellow", "value": 0.9 },
+          { "color": "green", "value": 0.98 } ] } } },
+      "targets": [ { "expr": "cottonmouth_compliance_ratio", "refId": "A" } ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Spans in window",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "targets": [ { "expr": "cottonmouth_spans_window", "refId": "A" } ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Denied actions (fleet)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 20 } ] } } },
+      "targets": [ { "expr": "cottonmouth_permission_checks_total_window{result=\"deny\"}", "refId": "A" } ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Backend up",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": { "defaults": { "mappings": [
+        { "type": "value", "options": { "1": { "text": "UP", "color": "green" }, "0": { "text": "DOWN", "color": "red" } } } ] } },
+      "targets": [ { "expr": "cottonmouth_up", "refId": "A" } ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Cost (USD) by agent",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "targets": [ { "expr": "sum by (agent) (cottonmouth_agent_cost_usd{agent=~\"$agent\"})", "legendFormat": "{{agent}}", "refId": "A" } ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Error rate by agent",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "targets": [ { "expr": "cottonmouth_agent_error_rate{agent=~\"$agent\"}", "legendFormat": "{{agent}}", "refId": "A" } ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Avg run duration (ms)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [ { "expr": "cottonmouth_agent_run_duration_ms_avg{agent=~\"$agent\"}", "legendFormat": "{{agent}}", "refId": "A" } ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Agent compliance ratio",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "targets": [ { "expr": "cottonmouth_agent_compliance_ratio{agent=~\"$agent\"}", "legendFormat": "{{agent}}", "refId": "A" } ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "MCP tool calls by agent",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [ { "expr": "sum by (agent) (cottonmouth_agent_tool_calls{agent=~\"$agent\"})", "legendFormat": "{{agent}}", "refId": "A" } ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Permission checks (allow vs deny)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [ { "expr": "sum by (result) (cottonmouth_permission_checks{agent=~\"$agent\"})", "legendFormat": "{{result}}", "refId": "A" } ]
+    }
+  ]
+}

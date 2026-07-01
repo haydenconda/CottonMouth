@@ -1,0 +1,10 @@
+# Static scrape config for plain Prometheus (no operator). Add under
+# scrape_configs: in your prometheus.yml. Uses in-cluster DNS for the backend
+# Service; adjust the target if scraping from outside the cluster.
+scrape_configs:
+  - job_name: cottonmouth
+    metrics_path: /metrics
+    scrape_interval: 30s
+    static_configs:
+      - targets:
+          - cottonmouth-backend.cottonmouth.svc.cluster.local:8150
