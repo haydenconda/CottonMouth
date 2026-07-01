@@ -326,6 +326,8 @@ export interface AgentPolicy {
   description?: string;
   enforcement?: string;
   default_effect?: string;
+  /** "enforce" blocks denied actions; "monitor" (shadow) only records them. */
+  mode?: "enforce" | "monitor";
   tools?: PolicyTool[];
   rules?: PolicyRule[];
   /** Gateway-only agents declare model access here instead of tools/rules. */
@@ -342,8 +344,27 @@ export interface PolicyDoc {
 }
 
 export interface PermissionAudit {
-  summary: { total: number; allowed: number; denied: number; deny_rate: number };
-  by_agent: Array<{ agent_name: string; allowed: number; denied: number }>;
+  summary: {
+    total: number;
+    allowed: number;
+    denied: number;
+    deny_rate: number;
+    /** allowed / total — the headline "% in compliance". */
+    compliance_rate: number;
+    /** denies that actually blocked the action (enforce mode). */
+    enforced_denied: number;
+    /** denies recorded in shadow mode — "would have been blocked". */
+    monitored_denied: number;
+  };
+  by_agent: Array<{
+    agent_name: string;
+    allowed: number;
+    denied: number;
+    enforced_denied: number;
+    monitored_denied: number;
+    compliance_rate: number;
+    mode: "enforce" | "monitor";
+  }>;
   by_action: Array<{ action: string; allowed: number; denied: number }>;
   recent_denials: Array<{
     trace_id: string;
@@ -352,6 +373,8 @@ export interface PermissionAudit {
     action: string;
     resource: string;
     policy: string;
+    mode: "enforce" | "monitor";
+    would_block: boolean;
     ts: string;
   }>;
 }

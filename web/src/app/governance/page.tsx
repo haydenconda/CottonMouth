@@ -141,7 +141,10 @@ function PolicyCard({
           <h3 className="text-sm font-semibold text-zinc-900">
             {policy.display_name ?? name}
           </h3>
-          <code className="ml-auto text-[11px] text-zinc-400">{name}</code>
+          <div className="ml-auto flex items-center gap-2">
+            {policy.mode && <ModeBadge mode={policy.mode} />}
+            <code className="text-[11px] text-zinc-400">{name}</code>
+          </div>
         </div>
         {policy.description && (
           <p className="mt-1.5 text-xs text-zinc-500">{policy.description}</p>
@@ -298,20 +301,57 @@ function GatewayPolicyCard({
   );
 }
 
+function ModeBadge({ mode }: { mode?: string }) {
+  const isMonitor = mode === "monitor";
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[10px] font-medium border ${
+        isMonitor
+          ? "border-sky-500/30 bg-sky-500/10 text-sky-700"
+          : "border-zinc-300 bg-zinc-100 text-zinc-600"
+      }`}
+      title={
+        isMonitor
+          ? "Shadow mode: verdicts are recorded but actions are NOT blocked"
+          : "Enforce mode: denied actions are blocked"
+      }
+    >
+      {isMonitor ? "monitor" : "enforce"}
+    </span>
+  );
+}
+
 function AuditPanel({ audit }: { audit: PermissionAudit }) {
   const { summary } = audit;
+  const compliancePct = (summary.compliance_rate ?? 1 - summary.deny_rate) * 100;
+  const complianceCls =
+    compliancePct >= 98
+      ? "text-emerald-600"
+      : compliancePct >= 90
+      ? "text-amber-600"
+      : "text-red-600";
   return (
     <div className="space-y-4">
       {/* Summary stats */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {[
-          { label: "Checks", value: summary.total, cls: "text-zinc-900" },
-          { label: "Allowed", value: summary.allowed, cls: "text-emerald-600" },
-          { label: "Denied", value: summary.denied, cls: "text-red-600" },
           {
-            label: "Deny rate",
-            value: `${(summary.deny_rate * 100).toFixed(1)}%`,
-            cls: "text-amber-600",
+            label: "Compliance",
+            value: `${compliancePct.toFixed(1)}%`,
+            cls: complianceCls,
+            hint: `${summary.allowed}/${summary.total} checks allowed`,
+          },
+          { label: "Checks", value: summary.total, cls: "text-zinc-900" },
+          {
+            label: "Blocked (enforced)",
+            value: summary.enforced_denied ?? summary.denied,
+            cls: "text-red-600",
+          },
+          {
+            label: "Would block (monitor)",
+            value: summary.monitored_denied ?? 0,
+            cls: "text-sky-600",
+            hint: "shadow-mode denials — not blocked",
           },
         ].map((s) => (
           <div
@@ -322,9 +362,50 @@ function AuditPanel({ audit }: { audit: PermissionAudit }) {
             <p className={`mt-1 text-2xl font-semibold tabular-nums ${s.cls}`}>
               {s.value}
             </p>
+            {s.hint && <p className="mt-0.5 text-[11px] text-zinc-400">{s.hint}</p>}
           </div>
         ))}
       </div>
+
+      {/* Compliance by agent */}
+      {audit.by_agent.length > 0 && (
+        <div className="rounded-lg border border-zinc-200 bg-white overflow-hidden">
+          <div className="border-b border-zinc-200 px-4 py-3">
+            <h3 className="text-sm font-medium text-zinc-700">Compliance by agent</h3>
+          </div>
+          <div className="divide-y divide-zinc-200">
+            {audit.by_agent.map((a) => {
+              const pct = (a.compliance_rate ?? 1) * 100;
+              return (
+                <div key={a.agent_name} className="flex items-center gap-3 px-4 py-2.5">
+                  <span className="w-40 shrink-0 truncate text-xs text-zinc-700">
+                    {a.agent_name}
+                  </span>
+                  <ModeBadge mode={a.mode} />
+                  <div className="flex-1 h-2 rounded-full bg-zinc-100 overflow-hidden">
+                    <div
+                      className={`h-full ${
+                        pct >= 98
+                          ? "bg-emerald-500/70"
+                          : pct >= 90
+                          ? "bg-amber-500/70"
+                          : "bg-red-500/70"
+                      }`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="w-14 text-right text-xs tabular-nums text-zinc-600">
+                    {pct.toFixed(0)}%
+                  </span>
+                  <span className="w-28 text-right text-[11px] tabular-nums text-zinc-400">
+                    {a.monitored_denied > 0 && `${a.monitored_denied} would-block`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* By action */}
       {audit.by_action.length > 0 && (
@@ -379,11 +460,20 @@ function AuditPanel({ audit }: { audit: PermissionAudit }) {
                 href={`/traces/${d.trace_id}`}
                 className="flex items-start gap-3 px-4 py-3 hover:bg-zinc-100 transition-colors"
               >
-                <ShieldX className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+                <ShieldX
+                  className={`mt-0.5 h-4 w-4 shrink-0 ${
+                    d.would_block ? "text-sky-600" : "text-red-600"
+                  }`}
+                />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 text-sm">
                     <code className="text-zinc-800">{d.action}</code>
                     <span className="truncate text-zinc-500">{d.resource}</span>
+                    {d.would_block && (
+                      <span className="shrink-0 rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-700">
+                        would block
+                      </span>
+                    )}
                   </div>
                   <p className="truncate text-xs text-red-600/80">{d.policy}</p>
                   <p className="text-[11px] text-zinc-400">{d.agent_name}</p>
