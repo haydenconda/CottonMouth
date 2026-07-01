@@ -54,7 +54,7 @@ _SPAN_FIELDS = {
     "input_tokens", "output_tokens", "cost_usd", "temperature",
     "tool_name", "tool_input", "tool_output", "decision_type",
     "options_considered", "chosen_option", "reasoning",
-    "permission_result", "permission_policy",
+    "permission_result", "permission_policy", "permission_mode",
 }
 
 _ingest_lock = asyncio.Lock()
@@ -481,6 +481,40 @@ async def handle_investigate_poll(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 
+API_VERSION = "1"
+
+
+async def handle_api_root(_: web.Request) -> web.Response:
+    """GET /api -- machine-readable capability/endpoint discovery.
+
+    A small, stable contract anchor so clients (including the CottonMouth MCP
+    server) can discover the available endpoints and the API version.
+    """
+    return _json_response({
+        "name": "cottonmouth",
+        "api_version": API_VERSION,
+        "endpoints": {
+            "health": "GET /api/health",
+            "events": "GET /api/events",
+            "events_stream": "GET /api/events/stream",
+            "traces": "GET /api/traces",
+            "trace_detail": "GET /api/traces/{trace_id}",
+            "span_detail": "GET /api/traces/{trace_id}/spans/{span_id}",
+            "agents": "GET /api/agents",
+            "agent_detail": "GET /api/agents/{name}",
+            "search": "GET /api/search?q=",
+            "policies": "GET /api/policies",
+            "gateway": "GET /api/gateway",
+            "permissions": "GET /api/permissions",
+            "metrics": "GET /metrics",
+            "ingest_spans": "POST /api/spans",
+            "investigate_submit": "POST /api/investigate",
+            "investigate_poll": "GET /api/investigate/{query_id}",
+            "agent_run": "POST /api/agent/run",
+        },
+    })
+
+
 async def handle_policies(_: web.Request) -> web.Response:
     """GET /api/policies -- the policy-as-data document the agents enforce."""
     return _json_response(load_policies())
@@ -592,25 +626,38 @@ async def handle_permissions(request: web.Request) -> web.Response:
     spans = await asyncio.to_thread(_load_traces_file)  # oldest-first
     checks = [s for s in reversed(spans) if s.get("span_type") == "permission_check"]
 
-    allowed = denied = 0
+    allowed = denied = enforced_denied = monitored_denied = 0
+    # Per agent we track allow/deny plus how denies split across enforcement mode:
+    # enforced denies were blocked; monitored denies "would have been blocked".
+    def _agent_rec() -> dict[str, int]:
+        return {"allowed": 0, "denied": 0, "enforced_denied": 0, "monitored_denied": 0}
+
     by_agent: dict[str, dict[str, int]] = {}
     by_action: dict[str, dict[str, int]] = {}
     recent_denials: list[dict] = []
 
     for s in checks:
         is_deny = s.get("permission_result") == "deny"
-        if is_deny:
-            denied += 1
-        else:
-            allowed += 1
-
+        mode = s.get("permission_mode") or "enforce"
         agent = s.get("agent_name", "unknown")
-        a = by_agent.setdefault(agent, {"allowed": 0, "denied": 0})
-        a["denied" if is_deny else "allowed"] += 1
-
+        a = by_agent.setdefault(agent, _agent_rec())
         action = s.get("tool_name", "") or s.get("name", "unknown")
         act = by_action.setdefault(action, {"allowed": 0, "denied": 0})
-        act["denied" if is_deny else "allowed"] += 1
+
+        if is_deny:
+            denied += 1
+            a["denied"] += 1
+            act["denied"] += 1
+            if mode == "monitor":
+                monitored_denied += 1
+                a["monitored_denied"] += 1
+            else:
+                enforced_denied += 1
+                a["enforced_denied"] += 1
+        else:
+            allowed += 1
+            a["allowed"] += 1
+            act["allowed"] += 1
 
         if is_deny and len(recent_denials) < limit:
             resource = ""
@@ -624,25 +671,54 @@ async def handle_permissions(request: web.Request) -> web.Response:
                 "action": action,
                 "resource": resource,
                 "policy": s.get("permission_policy", ""),
+                "mode": mode,
+                "would_block": mode == "monitor",
                 "ts": s.get("start_time", ""),
             })
 
     total = allowed + denied
+    # The configured enforcement mode per agent (from policy-as-data), so the UI
+    # can show which agents are in monitor (shadow) vs enforce.
+    from src.common.policies import agent_mode
     return _json_response({
         "summary": {
             "total": total,
             "allowed": allowed,
             "denied": denied,
             "deny_rate": round(denied / total, 4) if total else 0,
+            "compliance_rate": round(allowed / total, 4) if total else 1,
+            "enforced_denied": enforced_denied,
+            "monitored_denied": monitored_denied,
         },
         "by_agent": [
-            {"agent_name": k, **v} for k, v in sorted(by_agent.items())
+            {
+                "agent_name": k,
+                **v,
+                "compliance_rate": round(v["allowed"] / (v["allowed"] + v["denied"]), 4)
+                if (v["allowed"] + v["denied"]) else 1,
+                "mode": agent_mode(k),
+            }
+            for k, v in sorted(by_agent.items())
         ],
         "by_action": [
             {"action": k, **v} for k, v in sorted(by_action.items())
         ],
         "recent_denials": recent_denials,
     })
+
+
+async def handle_metrics(_: web.Request) -> web.Response:
+    """GET /metrics -- Prometheus text-format metrics for platform dashboards.
+
+    Derived from the same rolling span window as the dashboard so the numbers
+    reconcile with the Traces/Agents/Governance views. Scrape target for
+    Prometheus / the OpenTelemetry Collector prometheus receiver.
+    """
+    from src.common.metrics import render_metrics
+
+    spans = await asyncio.to_thread(_load_traces_file)
+    body, content_type = await asyncio.to_thread(render_metrics, spans)
+    return web.Response(body=body, headers={"Content-Type": content_type})
 
 
 async def handle_agent_run(request: web.Request) -> web.Response:
@@ -678,6 +754,7 @@ async def create_app() -> web.Application:
     """Build and return the aiohttp application."""
     app = web.Application(middlewares=[cors_middleware])
 
+    app.router.add_get("/api", handle_api_root)
     app.router.add_get("/api/health", handle_health)
     app.router.add_get("/api/events", handle_events)
     app.router.add_get("/api/events/stream", handle_events_stream)
@@ -694,6 +771,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/policies", handle_policies)
     app.router.add_get("/api/gateway", handle_gateway)
     app.router.add_get("/api/permissions", handle_permissions)
+    app.router.add_get("/metrics", handle_metrics)
 
     log.info("CottonMouth API routes registered")
     return app
