@@ -69,6 +69,15 @@ spec:
             #   kubectl -n cottonmouth rollout restart deploy/cottonmouth-backend
             - name: COTTONMOUTH_POLICIES_FILE
               value: /etc/cottonmouth/agent_policies.json
+            # Optional built-in Slack alerting. Create the secret to enable:
+            #   kubectl -n cottonmouth create secret generic cottonmouth-alerts \
+            #     --from-literal=slack-webhook-url=https://hooks.slack.com/services/XXX
+            - name: COTTONMOUTH_SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cottonmouth-alerts
+                  key: slack-webhook-url
+                  optional: true
           readinessProbe:
             httpGet:
               path: /api/health

@@ -15,6 +15,12 @@ data:
   # Alert thresholds for the trace watcher.
   AGENT_COST_ALERT_THRESHOLD: "0.30"
   AGENT_LATENCY_ALERT_MULTIPLIER: "2.0"
+  # Built-in Slack alerting (optional). Enable by creating the cottonmouth-alerts
+  # secret with the webhook URL (see docs/ALERTING.md); events at or above this
+  # severity are pushed to Slack. Set COTTONMOUTH_ALERT_SOURCES to filter.
+  COTTONMOUTH_ALERT_MIN_SEVERITY: "warning"
+  # Makes trace deep-links in Slack clickable; set to the dashboard's public URL.
+  COTTONMOUTH_DASHBOARD_URL: ""
   # Bedrock (Investigate) — only used if the SA has IRSA Bedrock access.
   AWS_REGION: "us-east-1"
   BEDROCK_REGION: "us-east-1"

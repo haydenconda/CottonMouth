@@ -63,6 +63,14 @@ def emit_event(
             if oversized:
                 _maybe_rotate(EVENTS_FILE, MAX_EVENT_LINES)
 
+    # Push to Slack if a webhook is configured (best-effort, off-thread). Done
+    # outside the file lock so alert delivery never serializes event writes.
+    try:
+        from src.common.alerts import maybe_dispatch
+        maybe_dispatch(event)
+    except Exception:
+        log.debug("alert dispatch skipped", exc_info=True)
+
 
 def rotate_jsonl_files() -> None:
     """Rotate support files (queries/responses) but NOT events — events are user-cleared."""
