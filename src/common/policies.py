@@ -41,3 +41,17 @@ def rule_values(agent_name: str, rule_id: str) -> list[str]:
         if rule.get("id") == rule_id:
             return list(rule.get("values", []))
     return []
+
+
+def agent_mode(agent_name: str, default: str = "enforce") -> str:
+    """Return the enforcement mode for an agent's policy.
+
+    ``"enforce"`` blocks denied actions; ``"monitor"`` (shadow mode) records the
+    verdict but lets the action proceed so compliance can be measured before
+    turning on enforcement. Falls back to the document-level ``default_mode``,
+    then ``default``.
+    """
+    doc = load_policies()
+    ap = doc.get("agents", {}).get(agent_name, {})
+    mode = ap.get("mode") or doc.get("default_mode") or default
+    return mode if mode in ("enforce", "monitor") else default

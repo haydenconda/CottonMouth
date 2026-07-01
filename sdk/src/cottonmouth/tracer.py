@@ -108,16 +108,29 @@ class Tracer:
         resource: str,
         allowed: bool,
         policy: str,
+        mode: str = "enforce",
     ) -> Span:
-        """Record an authorization check (the 'what was it allowed to do' pillar)."""
+        """Record an authorization check (the 'what was it allowed to do' pillar).
+
+        ``mode`` distinguishes enforcement from observation:
+          * ``"enforce"`` — a deny means the action was blocked.
+          * ``"monitor"`` — shadow mode: the verdict is recorded but the caller
+            still runs the action, so a deny means "would have been blocked".
+            Use this to measure compliance before turning on enforcement.
+        """
         span = self._child("permission_check", f"{action}: {resource}")
         span.tool_name = action
         span.tool_input = {"resource": resource}
         span.permission_result = "allow" if allowed else "deny"
         span.permission_policy = policy
-        span.finish(status="completed" if allowed else "failed")
+        span.permission_mode = mode if mode in ("enforce", "monitor") else "enforce"
+        # A monitored deny didn't fail the run — the action still proceeds — so
+        # keep its span status "completed" and only mark enforced denials failed.
+        blocked = (not allowed) and span.permission_mode == "enforce"
+        span.finish(status="failed" if blocked else "completed")
         if not allowed:
-            span.error = f"Denied by policy: {policy}"
+            verb = "Denied" if blocked else "Would deny (monitor)"
+            span.error = f"{verb} by policy: {policy}"
         self.emit(span)
         return span
 

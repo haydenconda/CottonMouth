@@ -54,6 +54,13 @@ ALLOWED_OWNERS = {
     for o in os.environ.get("DEVILS_COUNCIL_OWNERS", "haydenconda").split(",")
     if o.strip()
 }
+# Enforcement mode: 'enforce' refuses repos outside the owner allowlist;
+# 'monitor' (shadow mode) records the would-deny verdict but reviews anyway, so
+# CottonMouth can report how often the agent operates out of compliance before
+# enforcement is turned on. Matches devils-council's policy default (monitor).
+MODE = os.environ.get("DEVILS_COUNCIL_MODE", "monitor").strip().lower()
+if MODE not in ("enforce", "monitor"):
+    MODE = "monitor"
 
 _tracer = Tracer(agent_name=AGENT_NAME, agent_version=AGENT_VERSION)
 
@@ -173,12 +180,17 @@ def review(owner: str, repo: str, path: str) -> dict:
         # Pillar 4 — what it's allowed to do: repo-owner allowlist.
         allowed = owner.lower() in ALLOWED_OWNERS
         policy = f"devils-council may review repos owned by {sorted(ALLOWED_OWNERS)}"
-        _tracer.log_permission(action="read_repo", resource=target, allowed=allowed, policy=policy)
-        if not allowed:
+        _tracer.log_permission(action="read_repo", resource=target, allowed=allowed,
+                               policy=policy, mode=MODE)
+        # Enforce mode refuses; monitor (shadow) mode records the would-deny and
+        # proceeds so out-of-compliance activity is measurable, not blocked.
+        if not allowed and MODE == "enforce":
             root.metadata.update({"verdict": "DENIED", "reason": "owner not on allowlist"})
             root.finish(status="completed")
             return {"trace_id": root.trace_id, "verdict": "DENIED",
                     "answer": f"Refused: {owner} is not an allowed repo owner."}
+        if not allowed:
+            root.metadata.update({"compliance": "out-of-policy (monitored)"})
 
         # Pillar 2 — why: decide to pull the source via the gateway's MCP tool.
         _tracer.log_decision(

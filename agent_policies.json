@@ -1,7 +1,8 @@
 {
-  "version": "1.1.0",
-  "updated": "2026-06-25",
-  "description": "Single source of truth for agent permissions. The agent enforces these rules at runtime (emitting permission_check spans); the CottonMouth backend serves them to the governance UI. Deny-by-default: anything outside an allow rule is blocked.",
+  "version": "1.2.0",
+  "updated": "2026-07-01",
+  "description": "Single source of truth for agent permissions. The agent evaluates these rules at runtime (emitting permission_check spans); the CottonMouth backend serves them to the governance UI. Deny-by-default: anything outside an allow rule is denied. Each agent has a 'mode': 'enforce' blocks denied actions; 'monitor' (shadow mode) records the would-deny verdict but lets the action proceed, so you can measure compliance % before turning on enforcement.",
+  "default_mode": "enforce",
   "llm_gateway": {
     "display_name": "LiteLLM Gateway",
     "description": "Model access, budgets, and rate limits are enforced by the shared in-cluster LiteLLM gateway via virtual keys — NOT duplicated in CottonMouth. CottonMouth observes the gateway's decisions (recording denials as governance events) and reconciles each agent's declared model access against the entitlements on its actual virtual key (drift detection).",
@@ -25,6 +26,7 @@
       "description": "External Cursor agents that route every model call through the shared LiteLLM gateway via their team virtual key (alias 'devils-council'). CottonMouth observes the model traffic, cost, and the gateway's access decisions; it does not see Cursor's internal reasoning/tool steps unless those are MCP-routed through the gateway.",
       "enforcement": "LiteLLM gateway (virtual key); CottonMouth observes + reconciles",
       "default_effect": "deny",
+      "mode": "monitor",
       "gateway": {
         "key_alias": "devils-council",
         "declared_models": ["claude-3-haiku", "claude-3-sonnet"]
@@ -35,6 +37,7 @@
       "description": "Tool-using Bedrock agent that reads/writes files, runs shell commands, and fetches URLs inside a sandboxed workspace.",
       "enforcement": "CottonMouth SDK permission_check spans, evaluated before every tool call",
       "default_effect": "deny",
+      "mode": "enforce",
       "tools": [
         { "name": "read_file", "description": "Read a UTF-8 text file", "effect": "allow", "scope": "workspace only" },
         { "name": "write_file", "description": "Create or overwrite a text file", "effect": "allow", "scope": "workspace only" },

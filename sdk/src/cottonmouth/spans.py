@@ -48,6 +48,11 @@ class Span:
     # do, the policy that applied, and whether it was allowed.
     permission_result: str = ""  # allow | deny
     permission_policy: str = ""
+    # Enforcement mode for this check:
+    #   "enforce" — a deny actually blocked the action.
+    #   "monitor" — shadow mode: the verdict was recorded but the action still
+    #               ran, so a deny here means "would have been blocked".
+    permission_mode: str = "enforce"
 
     _start_mono: float = field(default_factory=time.monotonic, repr=False)
 

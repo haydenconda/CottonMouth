@@ -89,7 +89,28 @@ def _load_policy() -> tuple[set[str], set[str], set[str]]:
         return _DEFAULT_ALLOWED_COMMANDS, _DEFAULT_DENY_COMMANDS, _DEFAULT_ALLOWED_HOSTS
 
 
+def _load_mode() -> str:
+    """Enforcement mode for this agent from the policy doc.
+
+    'enforce' blocks denied actions; 'monitor' (shadow mode) records the
+    would-deny verdict but lets the action proceed so compliance can be measured
+    before enforcement is turned on. ``COTTONMOUTH_POLICY_MODE`` overrides.
+    """
+    override = os.environ.get("COTTONMOUTH_POLICY_MODE", "").strip().lower()
+    if override in ("enforce", "monitor"):
+        return override
+    env = os.environ.get("COTTONMOUTH_POLICIES_FILE", "")
+    path = Path(env) if env else Path(__file__).resolve().parents[1] / "agent_policies.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        mode = doc["agents"][AGENT_NAME].get("mode") or doc.get("default_mode") or "enforce"
+        return mode if mode in ("enforce", "monitor") else "enforce"
+    except Exception:
+        return "enforce"
+
+
 ALLOWED_COMMANDS, DENY_COMMANDS, ALLOWED_HTTP_HOSTS = _load_policy()
+AGENT_MODE = _load_mode()
 
 SYSTEM_PROMPT = (
     "You are an ops assistant working inside a sandboxed workspace. You have "
@@ -291,12 +312,19 @@ def run_task(task: str) -> dict:
 
                 # Pillar 4: allowed — check policy before doing anything.
                 allowed, policy = _PERMISSION_CHECKS.get(tool, lambda a: (False, "unknown tool"))(args)
-                _tracer.log_permission(action=tool, resource=resource, allowed=allowed, policy=policy)
+                _tracer.log_permission(
+                    action=tool, resource=resource, allowed=allowed,
+                    policy=policy, mode=AGENT_MODE,
+                )
 
                 if not allowed:
                     denials += 1
-                    tool_results.append((tu["toolUseId"], f"PERMISSION DENIED: {policy}", "error"))
-                    continue
+                    # Enforce mode blocks; monitor (shadow) mode records the
+                    # would-deny verdict but lets the action run anyway so we can
+                    # measure compliance before turning enforcement on.
+                    if AGENT_MODE == "enforce":
+                        tool_results.append((tu["toolUseId"], f"PERMISSION DENIED: {policy}", "error"))
+                        continue
 
                 # Pillar 1: what — execute and record the real tool call.
                 span = Span(
