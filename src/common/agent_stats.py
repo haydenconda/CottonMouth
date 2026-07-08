@@ -106,6 +106,24 @@ def _run_agent_names(spans: list[dict]) -> set[str]:
     }
 
 
+def _run_trace_ids(spans: list[dict]) -> set[str]:
+    """Traces that contain a real agent_run span.
+
+    Used instead of ``_run_agent_names`` to decide whether a given ``llm_call``/
+    ``tool_call`` belongs to an instrumented run. An identity (virtual-key
+    alias) can do BOTH: run full SDK-instrumented agents (e.g. devils_council.py)
+    AND make raw ad-hoc gateway calls under the same alias (e.g. opencode/Cursor
+    pointed at the gateway). Excluding by agent_name would make those ad-hoc
+    calls vanish from the dashboard entirely just because the same identity
+    happens to also run instrumented traces elsewhere.
+    """
+    return {
+        s.get("trace_id")
+        for s in spans
+        if s.get("span_type") == "agent_run" and s.get("trace_id")
+    }
+
+
 def _is_gateway_llm_call(s: dict) -> bool:
     return (
         s.get("span_type") == "llm_call"
@@ -129,7 +147,7 @@ def compute_gateway_agent_stats(spans: list[dict]) -> list[dict]:
     ``tool_call``s), plus tokens, cost, and the gateway's allow/deny verdicts.
     An agent that only ever calls MCP tools (no model calls) still shows up.
     """
-    run_agents = _run_agent_names(spans)
+    run_trace_ids = _run_trace_ids(spans)
     accs: dict[str, dict] = {}
 
     def _get(name: str) -> dict:
@@ -148,7 +166,10 @@ def compute_gateway_agent_stats(spans: list[dict]) -> list[dict]:
         if not (is_llm or is_tool):
             continue
         name = s.get("agent_name")
-        if not name or name in run_agents:
+        # Skip only spans that belong to an instrumented run's own trace -- they're
+        # already rolled into that run's cost/duration above. A standalone call
+        # under the same alias (different trace, no agent_run) still counts here.
+        if not name or s.get("trace_id") in run_trace_ids:
             continue
         acc = _get(name)
         acc["cost"] += s.get("cost_usd", 0) or 0

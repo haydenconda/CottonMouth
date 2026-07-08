@@ -30,6 +30,18 @@ data:
         litellm_params:
           model: bedrock/anthropic.claude-3-sonnet-20240229-v1:0
           aws_region_name: us-east-1
+      # Coding-agent friendly models (opencode/Cursor CLI etc. send Anthropic
+      # prompt-cache breakpoints by default; only these newer cross-region
+      # profiles support Bedrock prompt caching -- the 3.x models above 400 on
+      # any request carrying cache_control).
+      - model_name: claude-haiku-4-5
+        litellm_params:
+          model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+          aws_region_name: us-east-1
+      - model_name: claude-sonnet-4-5
+        litellm_params:
+          model: bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+          aws_region_name: us-east-1
 
     litellm_settings:
       # CottonMouth observability: every gateway call becomes an llm_call span,

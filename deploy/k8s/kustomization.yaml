@@ -35,7 +35,7 @@ resources:
 images:
   - name: cottonmouth-backend
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-backend
-    newTag: v20
+    newTag: v21
   - name: cottonmouth-web
     newName: 621741996708.dkr.ecr.us-east-1.amazonaws.com/cottonmouth-web
     newTag: v10

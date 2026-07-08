@@ -311,11 +311,16 @@ async def handle_agent_detail(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     spans = await asyncio.to_thread(_load_traces_file)
     result = compute_agent_stats(name, spans)
+    gw = compute_gateway_agent_detail(name, spans)
     if "error" in result:
-        gw = compute_gateway_agent_detail(name, spans)
         if gw is not None:
             return _json_response(gw)
         return _json_response(result, status=404)
+    # Same identity can both run instrumented traces AND make raw ad-hoc gateway
+    # calls (e.g. devils_council.py runs + opencode/Cursor pointed at the same
+    # virtual key). Attach the ad-hoc activity instead of silently dropping it.
+    if gw is not None:
+        result["gateway"] = gw
     return _json_response(result)
 
 
