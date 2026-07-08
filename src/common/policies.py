@@ -5,7 +5,11 @@ agent enforces these rules at runtime (emitting permission_check spans) and the
 backend serves them to the governance UI. Both read the same file from the
 shared image, so what the UI shows is exactly what the agent is bound by.
 
-``COTTONMOUTH_POLICIES_FILE`` overrides the path (e.g. when mounting a ConfigMap).
+``COTTONMOUTH_POLICIES_FILE`` overrides the path (e.g. when mounting a
+ConfigMap). That ConfigMap is optional (see deploy/k8s/backend.yaml) — if it
+isn't created, the mounted path won't exist. In that case we fall back to the
+image's bundled copy rather than silently serving an empty policy document
+(which would report every agent as an unconfigured "enforce").
 """
 from __future__ import annotations
 
@@ -16,11 +20,18 @@ from typing import Any
 
 # repo root = .../cottonmouth (this file is src/common/policies.py)
 BASE_DIR = Path(__file__).resolve().parents[2]
+_BUNDLED_POLICIES_FILE = BASE_DIR / "agent_policies.json"
 
 
 def policies_file() -> Path:
     override = os.environ.get("COTTONMOUTH_POLICIES_FILE", "")
-    return Path(override) if override else BASE_DIR / "agent_policies.json"
+    if not override:
+        return _BUNDLED_POLICIES_FILE
+    path = Path(override)
+    # The override normally points at an optional ConfigMap mount. If that
+    # ConfigMap wasn't created, the path won't exist -- fall back to the
+    # bundled copy instead of silently going policy-less.
+    return path if path.exists() else _BUNDLED_POLICIES_FILE
 
 
 def load_policies() -> dict[str, Any]:
