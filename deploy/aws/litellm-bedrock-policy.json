@@ -12,7 +12,7 @@
       ],
       "Resource": [
         "arn:aws:bedrock:*::foundation-model/anthropic.*",
-        "arn:aws:bedrock:*:621741996708:inference-profile/*"
+        "arn:aws:bedrock:*:${AWS_ACCOUNT_ID}:inference-profile/*"
       ]
     }
   ]
