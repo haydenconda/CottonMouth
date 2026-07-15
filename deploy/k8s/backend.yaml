@@ -78,6 +78,27 @@ spec:
                   name: cottonmouth-alerts
                   key: slack-webhook-url
                   optional: true
+            # Dashboard/API auth (CORE-10694). Both optional: if the secret
+            # isn't created, a random admin password is generated and logged
+            # once at startup, and the session-signing key is generated and
+            # persisted in the state DB on first boot. Pin both explicitly in
+            # a real deployment so the admin login and existing sessions
+            # survive a redeploy:
+            #   kubectl -n cottonmouth create secret generic cottonmouth-auth \
+            #     --from-literal=admin-password="$(openssl rand -base64 18)" \
+            #     --from-literal=secret-key="$(openssl rand -hex 32)"
+            - name: COTTONMOUTH_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cottonmouth-auth
+                  key: admin-password
+                  optional: true
+            - name: COTTONMOUTH_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cottonmouth-auth
+                  key: secret-key
+                  optional: true
           readinessProbe:
             httpGet:
               path: /api/health

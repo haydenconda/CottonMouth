@@ -25,3 +25,10 @@ data:
   AWS_REGION: "us-east-1"
   BEDROCK_REGION: "us-east-1"
   BEDROCK_MODEL: "us.anthropic.claude-opus-4-6-v1"
+  # Dashboard/API auth (CORE-10694). Username for the bootstrap admin account
+  # created on first startup (password comes from the cottonmouth-auth secret,
+  # see backend.yaml). Cookie defaults to non-Secure because the primary access
+  # path today is `kubectl port-forward` over plain http — flip to "1" once
+  # this is served over https.
+  COTTONMOUTH_ADMIN_USERNAME: "admin"
+  COTTONMOUTH_COOKIE_SECURE: "0"

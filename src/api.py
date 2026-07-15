@@ -89,10 +89,78 @@ async def cors_middleware(request: web.Request, handler) -> web.StreamResponse:
         except web.HTTPException as exc:
             response = exc
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     response.headers["Access-Control-Max-Age"] = "3600"
     return response
+
+
+# ---------------------------------------------------------------------------
+# Auth middleware (CORE-10694) — session cookie or API-key bearer token.
+#
+# Everything under /api/* requires a logged-in user or a valid API key EXCEPT
+# the small allowlist below: health/discovery (so the dashboard can render a
+# "backend unreachable" state pre-login), the login endpoint itself, and
+# /api/spans (which keeps its own, separate ingest-token check via
+# COTTONMOUTH_API_KEY — that's machine-to-machine span ingest from the SDK,
+# not a user-facing endpoint, so it isn't part of the user/role system).
+# /metrics also stays open: Prometheus scrape configs don't carry a session,
+# and this mirrors the existing unauthenticated quickstart scrape job.
+# ---------------------------------------------------------------------------
+
+SESSION_COOKIE = "cm_session"
+SESSION_TTL_SECONDS = 7 * 24 * 3600
+
+_PUBLIC_PATHS = {"/api", "/api/health", "/api/auth/login", "/api/spans", "/metrics"}
+
+
+def _authenticate(request: web.Request) -> dict | None:
+    from src.common.auth import hash_api_key, verify_session_token
+    from src.common import users as users_store
+
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        payload = verify_session_token(token)
+        if payload:
+            return {
+                "id": payload.get("uid"), "username": payload.get("username", ""),
+                "role": payload.get("role", "viewer"), "auth": "session",
+            }
+
+    authz = request.headers.get("Authorization", "")
+    if authz.startswith("Bearer "):
+        raw = authz[len("Bearer "):].strip()
+        if raw:
+            rec = users_store.get_api_key_by_hash(hash_api_key(raw))
+            if rec and not rec["disabled"]:
+                users_store.touch_api_key(rec["id"])
+                return {"id": None, "username": f"apikey:{rec['name']}", "role": rec["role"], "auth": "api_key"}
+    return None
+
+
+@web.middleware
+async def auth_middleware(request: web.Request, handler) -> web.StreamResponse:
+    if request.method == "OPTIONS" or not request.path.startswith("/api") or request.path in _PUBLIC_PATHS:
+        return await handler(request)
+    user = await asyncio.to_thread(_authenticate, request)
+    if user is None:
+        return _json_response({"error": "unauthorized"}, status=401)
+    request["user"] = user
+    return await handler(request)
+
+
+def require_role(minimum: str):
+    """Route decorator: 403s unless the authenticated user (set by
+    ``auth_middleware``) has at least ``minimum`` role."""
+    def deco(fn):
+        async def wrapper(request: web.Request) -> web.Response:
+            from src.common.auth import role_at_least
+            user = request.get("user")
+            if not user or not role_at_least(user["role"], minimum):
+                return _json_response({"error": f"requires role >= {minimum}"}, status=403)
+            return await fn(request)
+        return wrapper
+    return deco
 
 
 # ---------------------------------------------------------------------------
@@ -523,13 +591,33 @@ async def handle_api_root(_: web.Request) -> web.Response:
             "investigate_submit": "POST /api/investigate",
             "investigate_poll": "GET /api/investigate/{query_id}",
             "agent_run": "POST /api/agent/run",
+            "login": "POST /api/auth/login",
+            "logout": "POST /api/auth/logout",
+            "me": "GET /api/auth/me",
+            "set_agent_mode": "PATCH /api/policies/{name}/mode (operator+)",
+            "admin_users": "GET/POST /api/admin/users, PATCH/DELETE /api/admin/users/{id} (admin)",
+            "admin_api_keys": "GET/POST /api/admin/api-keys, DELETE /api/admin/api-keys/{id} (admin)",
         },
+        "auth": "session cookie (login via /api/auth/login) or 'Authorization: Bearer <api_key>'",
     })
 
 
 async def handle_policies(_: web.Request) -> web.Response:
-    """GET /api/policies -- the policy-as-data document the agents enforce."""
-    return _json_response(load_policies())
+    """GET /api/policies -- the policy-as-data document the agents enforce,
+    with any runtime mode overrides (set via the admin UI) merged in so the
+    Governance view always shows the mode actually in effect."""
+    from src.common.users import list_policy_overrides
+
+    doc = load_policies()
+    overrides = await asyncio.to_thread(list_policy_overrides)
+    for name, ap in (doc.get("agents") or {}).items():
+        ov = overrides.get(name)
+        if ov:
+            ap["mode"] = ov["mode"]
+            ap["mode_overridden"] = True
+            ap["mode_updated_by"] = ov.get("updated_by")
+            ap["mode_updated_at"] = ov.get("updated_at")
+    return _json_response(doc)
 
 
 def _bare_model(m: str) -> str:
@@ -761,9 +849,230 @@ async def handle_agent_run(request: web.Request) -> web.Response:
         return _json_response({"error": f"agent unreachable: {exc}"}, status=502)
 
 
+
+# ---------------------------------------------------------------------------
+# Auth & admin endpoints (CORE-10694)
+# ---------------------------------------------------------------------------
+
+
+def _cookie_secure() -> bool:
+    # Default insecure: the primary access path today is `kubectl port-forward`
+    # over plain http, and a Secure cookie is silently dropped by the browser
+    # on http origins, which would look like login "not working". Opt in once
+    # CottonMouth is actually served over https.
+    return os.environ.get("COTTONMOUTH_COOKIE_SECURE", "0") == "1"
+
+
+async def handle_login(request: web.Request) -> web.Response:
+    """POST /api/auth/login {username, password} -> sets a signed session cookie."""
+    from src.common import users as users_store
+    from src.common.auth import create_session_token, verify_password
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, Exception):
+        return _json_response({"error": "invalid JSON body"}, status=400)
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+
+    row = await asyncio.to_thread(users_store.get_user_by_username, username)
+    if not row or row["disabled"] or not verify_password(password, row["password_hash"]):
+        return _json_response({"error": "invalid username or password"}, status=401)
+
+    token = create_session_token(row["id"], row["username"], row["role"], SESSION_TTL_SECONDS)
+    resp = _json_response({"username": row["username"], "role": row["role"]})
+    resp.set_cookie(
+        SESSION_COOKIE, token, max_age=SESSION_TTL_SECONDS, httponly=True,
+        samesite="Lax", secure=_cookie_secure(), path="/",
+    )
+    return resp
+
+
+async def handle_logout(_: web.Request) -> web.Response:
+    resp = _json_response({"ok": True})
+    resp.del_cookie(SESSION_COOKIE, path="/")
+    return resp
+
+
+async def handle_me(request: web.Request) -> web.Response:
+    user = request.get("user")
+    if not user:
+        return _json_response({"error": "unauthorized"}, status=401)
+    return _json_response({"username": user["username"], "role": user["role"], "auth": user["auth"]})
+
+
+async def handle_list_users(_: web.Request) -> web.Response:
+    from src.common import users as users_store
+    rows = await asyncio.to_thread(users_store.list_users)
+    return _json_response({"users": rows})
+
+
+async def handle_create_user(request: web.Request) -> web.Response:
+    from src.common import users as users_store
+    from src.common.auth import ROLES
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, Exception):
+        return _json_response({"error": "invalid JSON body"}, status=400)
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    role = (body.get("role") or "viewer").strip()
+    if not username or len(password) < 8:
+        return _json_response({"error": "username required; password must be >= 8 chars"}, status=400)
+    if role not in ROLES:
+        return _json_response({"error": f"role must be one of {ROLES}"}, status=400)
+    try:
+        uid = await asyncio.to_thread(users_store.create_user, username, password, role)
+    except users_store.UserExistsError:
+        return _json_response({"error": "username already exists"}, status=409)
+    return _json_response({"id": uid, "username": username, "role": role}, status=201)
+
+
+async def handle_update_user(request: web.Request) -> web.Response:
+    from src.common import users as users_store
+    from src.common.auth import ROLES
+
+    try:
+        uid = int(request.match_info["id"])
+    except ValueError:
+        return _json_response({"error": "invalid id"}, status=400)
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, Exception):
+        body = {}
+
+    role = body.get("role")
+    if role is not None and role not in ROLES:
+        return _json_response({"error": f"role must be one of {ROLES}"}, status=400)
+    disabled = body.get("disabled")
+    password = body.get("password")
+    if password is not None and len(password) < 8:
+        return _json_response({"error": "password must be >= 8 chars"}, status=400)
+
+    # Guard against locking everyone out: can't demote/disable the last admin.
+    if (role is not None and role != "admin") or disabled is True:
+        rows = await asyncio.to_thread(users_store.list_users)
+        target = next((r for r in rows if r["id"] == uid), None)
+        if target and target["role"] == "admin" and not target["disabled"]:
+            remaining = await asyncio.to_thread(users_store.count_admins, uid)
+            if remaining == 0:
+                return _json_response({"error": "cannot demote/disable the last remaining admin"}, status=409)
+
+    ok = await asyncio.to_thread(users_store.update_user, uid, role, disabled, password)
+    if not ok:
+        return _json_response({"error": "user not found"}, status=404)
+    return _json_response({"ok": True})
+
+
+async def handle_delete_user(request: web.Request) -> web.Response:
+    from src.common import users as users_store
+
+    try:
+        uid = int(request.match_info["id"])
+    except ValueError:
+        return _json_response({"error": "invalid id"}, status=400)
+    if uid == request["user"].get("id"):
+        return _json_response({"error": "cannot delete your own account"}, status=409)
+    ok = await asyncio.to_thread(users_store.delete_user, uid)
+    if not ok:
+        return _json_response({"error": "user not found"}, status=404)
+    return _json_response({"ok": True})
+
+
+async def handle_list_api_keys(_: web.Request) -> web.Response:
+    from src.common import users as users_store
+    rows = await asyncio.to_thread(users_store.list_api_keys)
+    return _json_response({"api_keys": rows})
+
+
+async def handle_create_api_key(request: web.Request) -> web.Response:
+    from src.common import users as users_store
+    from src.common.auth import ROLES, generate_api_key
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, Exception):
+        body = {}
+    name = (body.get("name") or "").strip()
+    role = (body.get("role") or "viewer").strip()
+    if not name:
+        return _json_response({"error": "name required"}, status=400)
+    if role not in ROLES:
+        return _json_response({"error": f"role must be one of {ROLES}"}, status=400)
+
+    raw_key, key_hash = generate_api_key()
+    kid = await asyncio.to_thread(
+        users_store.create_api_key, name, key_hash, role, request["user"]["username"],
+    )
+    # The raw key is only ever returned here -- it isn't retrievable again.
+    return _json_response({"id": kid, "name": name, "role": role, "key": raw_key}, status=201)
+
+
+async def handle_delete_api_key(request: web.Request) -> web.Response:
+    from src.common import users as users_store
+    try:
+        kid = int(request.match_info["id"])
+    except ValueError:
+        return _json_response({"error": "invalid id"}, status=400)
+    ok = await asyncio.to_thread(users_store.revoke_api_key, kid)
+    if not ok:
+        return _json_response({"error": "not found"}, status=404)
+    return _json_response({"ok": True})
+
+
+async def handle_set_agent_mode(request: web.Request) -> web.Response:
+    """PATCH /api/policies/{name}/mode {mode: "enforce"|"monitor"} -- flip an
+    agent's enforcement mode from the admin UI without touching the
+    agent_policies.json ConfigMap. Stored as a DB override that always wins
+    over the file (see src.common.policies.agent_mode)."""
+    from src.common import users as users_store
+
+    name = request.match_info["name"]
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, Exception):
+        return _json_response({"error": "invalid JSON body"}, status=400)
+    mode = (body.get("mode") or "").strip().lower()
+    if mode not in ("enforce", "monitor"):
+        return _json_response({"error": "mode must be 'enforce' or 'monitor'"}, status=400)
+    await asyncio.to_thread(users_store.set_policy_override, name, mode, request["user"]["username"])
+    return _json_response({"agent_name": name, "mode": mode})
+
+
+async def _bootstrap_admin(_: web.Application) -> None:
+    """Ensure at least one admin user exists so a fresh deploy always has a
+    way in. If COTTONMOUTH_ADMIN_PASSWORD isn't set, generate one and log it
+    once -- log in and change it, or set the env var and redeploy to pin it."""
+    from src.common import users as users_store
+
+    try:
+        if await asyncio.to_thread(users_store.count_users) > 0:
+            return
+        username = os.environ.get("COTTONMOUTH_ADMIN_USERNAME", "admin").strip() or "admin"
+        password = os.environ.get("COTTONMOUTH_ADMIN_PASSWORD", "").strip()
+        generated = False
+        if not password:
+            import secrets as _secrets
+            password = _secrets.token_urlsafe(12)
+            generated = True
+        await asyncio.to_thread(users_store.create_user, username, password, "admin")
+        if generated:
+            log.warning(
+                "No COTTONMOUTH_ADMIN_PASSWORD set -- generated a one-time admin login. "
+                "username=%s password=%s -- log in and change it, or set "
+                "COTTONMOUTH_ADMIN_PASSWORD (from a Secret) and redeploy to pin it.",
+                username, password,
+            )
+        else:
+            log.info("Bootstrapped admin user %r from COTTONMOUTH_ADMIN_PASSWORD", username)
+    except Exception:
+        log.exception("Admin bootstrap failed")
+
+
 async def create_app() -> web.Application:
     """Build and return the aiohttp application."""
-    app = web.Application(middlewares=[cors_middleware])
+    app = web.Application(middlewares=[cors_middleware, auth_middleware])
 
     app.router.add_get("/api", handle_api_root)
     app.router.add_get("/api/health", handle_health)
@@ -780,9 +1089,23 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/investigate/{query_id}", handle_investigate_poll)
     app.router.add_post("/api/agent/run", handle_agent_run)
     app.router.add_get("/api/policies", handle_policies)
+    app.router.add_patch("/api/policies/{name}/mode", require_role("operator")(handle_set_agent_mode))
     app.router.add_get("/api/gateway", handle_gateway)
     app.router.add_get("/api/permissions", handle_permissions)
     app.router.add_get("/metrics", handle_metrics)
+
+    # Auth (CORE-10694): login/logout/me are open to any request (the login
+    # check itself is the auth); admin endpoints require the admin role.
+    app.router.add_post("/api/auth/login", handle_login)
+    app.router.add_post("/api/auth/logout", handle_logout)
+    app.router.add_get("/api/auth/me", handle_me)
+    app.router.add_get("/api/admin/users", require_role("admin")(handle_list_users))
+    app.router.add_post("/api/admin/users", require_role("admin")(handle_create_user))
+    app.router.add_patch("/api/admin/users/{id}", require_role("admin")(handle_update_user))
+    app.router.add_delete("/api/admin/users/{id}", require_role("admin")(handle_delete_user))
+    app.router.add_get("/api/admin/api-keys", require_role("admin")(handle_list_api_keys))
+    app.router.add_post("/api/admin/api-keys", require_role("admin")(handle_create_api_key))
+    app.router.add_delete("/api/admin/api-keys/{id}", require_role("admin")(handle_delete_api_key))
 
     # Seed the Prometheus counters once from the existing trace window so /metrics
     # isn't empty right after a (re)deploy and reconciles with the dashboard's
@@ -797,6 +1120,7 @@ async def create_app() -> web.Application:
             log.warning("metrics seed skipped: %s", exc)
 
     app.on_startup.append(_seed_metrics)
+    app.on_startup.append(_bootstrap_admin)
 
     log.info("CottonMouth API routes registered")
     return app

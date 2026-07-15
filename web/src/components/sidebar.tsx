@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { LayoutDashboard, GitBranch, Bot, ShieldCheck, Activity } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { LayoutDashboard, GitBranch, Bot, ShieldCheck, Activity, Settings, LogOut } from "lucide-react";
 import { CottonmouthLogo } from "@/components/logo";
 import { cn } from "@/lib/utils";
+import { useAuth, roleAtLeast } from "@/lib/auth-context";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -16,6 +17,13 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const { user, logout } = useAuth();
+
+  async function handleLogout() {
+    await logout();
+    router.replace("/login");
+  }
 
   return (
     <aside className="fixed inset-y-0 left-0 z-40 flex w-56 flex-col border-r border-zinc-200 bg-white">
@@ -51,10 +59,44 @@ export function Sidebar() {
             </Link>
           );
         })}
+
+        {roleAtLeast(user?.role, "admin") && (
+          <Link
+            href="/admin"
+            className={cn(
+              "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+              pathname.startsWith("/admin")
+                ? "bg-emerald-50 text-emerald-700"
+                : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+            )}
+          >
+            <Settings className="h-4 w-4" />
+            Admin
+          </Link>
+        )}
       </nav>
 
-      {/* Footer */}
-      <div className="border-t border-zinc-200 px-5 py-3">
+      {/* Footer: signed-in user + logout */}
+      <div className="border-t border-zinc-200 px-4 py-3">
+        {user && (
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="truncate text-xs font-medium text-zinc-700">
+                {user.username}
+              </p>
+              <p className="text-[10px] uppercase tracking-wider text-zinc-400">
+                {user.role}
+              </p>
+            </div>
+            <button
+              onClick={handleLogout}
+              title="Sign out"
+              className="shrink-0 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
         <p className="text-[10px] uppercase tracking-wider text-zinc-400">
           Agent Observability
         </p>

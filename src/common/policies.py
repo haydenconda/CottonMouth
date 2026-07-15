@@ -59,9 +59,21 @@ def agent_mode(agent_name: str, default: str = "enforce") -> str:
 
     ``"enforce"`` blocks denied actions; ``"monitor"`` (shadow mode) records the
     verdict but lets the action proceed so compliance can be measured before
-    turning on enforcement. Falls back to the document-level ``default_mode``,
-    then ``default``.
+    turning on enforcement.
+
+    A runtime override set from the admin UI (``PATCH /api/policies/{agent}/mode``,
+    operator+ role) always wins over the file -- that's what lets the mode be
+    flipped without editing the ``agent_policies.json`` ConfigMap by hand. Falls
+    back to the file's per-agent ``mode``, then the document-level
+    ``default_mode``, then ``default``.
     """
+    try:
+        from src.common.users import get_policy_override
+        override = get_policy_override(agent_name)
+        if override in ("enforce", "monitor"):
+            return override
+    except Exception:
+        pass  # override store unavailable (e.g. during early boot) -- fall back to file
     doc = load_policies()
     ap = doc.get("agents", {}).get(agent_name, {})
     mode = ap.get("mode") or doc.get("default_mode") or default

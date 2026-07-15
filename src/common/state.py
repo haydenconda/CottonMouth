@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 
@@ -9,6 +10,21 @@ DB_PATH = data_dir() / "agent_state.db"
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
+
+
+def get_conn() -> sqlite3.Connection:
+    """Expose the shared connection for other modules (e.g. ``users.py``)
+    that need their own tables in the same DB file/lock without duplicating
+    the connection-setup dance here."""
+    return _get_conn()
+
+
+@contextlib.contextmanager
+def locked():
+    """Serialize access to the shared connection, matching the locking this
+    module already does around every query below."""
+    with _lock:
+        yield
 
 
 def _get_conn() -> sqlite3.Connection:

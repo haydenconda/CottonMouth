@@ -6,6 +6,8 @@ import {
   fetchPolicies,
   fetchPermissionAudit,
   fetchGateway,
+  setAgentMode,
+  ApiError,
   type PolicyDoc,
   type AgentPolicy,
   type GatewayPolicy,
@@ -14,6 +16,7 @@ import {
   type PermissionAudit,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
+import { useAuth, roleAtLeast } from "@/lib/auth-context";
 import {
   ShieldCheck,
   ShieldX,
@@ -24,6 +27,7 @@ import {
   ShieldAlert,
   Cpu,
   AlertTriangle,
+  Loader2,
 } from "lucide-react";
 
 const CATEGORY_META: Record<
@@ -126,11 +130,18 @@ function PolicyCard({
   name,
   policy,
   gateway,
+  canEditMode,
 }: {
   name: string;
   policy: AgentPolicy;
   gateway?: GatewayAgentReconcile;
+  canEditMode: boolean;
 }) {
+  const [mode, setMode] = useState(policy.mode);
+  // Resync local (optimistically-updated) mode when the poll refreshes the
+  // underlying policy doc, e.g. after another operator changes it elsewhere.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => setMode(policy.mode), [policy.mode]);
   const tools = policy.tools ?? [];
   const rules = policy.rules ?? [];
   return (
@@ -142,7 +153,15 @@ function PolicyCard({
             {policy.display_name ?? name}
           </h3>
           <div className="ml-auto flex items-center gap-2">
-            {policy.mode && <ModeBadge mode={policy.mode} />}
+            {mode && (
+              <ModeToggle
+                agentName={name}
+                mode={mode}
+                overridden={policy.mode_overridden}
+                canEdit={canEditMode}
+                onChanged={setMode}
+              />
+            )}
             <code className="text-[11px] text-zinc-400">{name}</code>
           </div>
         </div>
@@ -157,6 +176,12 @@ function PolicyCard({
                 default: {policy.default_effect}
               </span>
             )}
+          </p>
+        )}
+        {policy.mode_overridden && (
+          <p className="mt-1 text-[11px] text-sky-600">
+            Mode overridden from the admin UI{policy.mode_updated_by ? ` by ${policy.mode_updated_by}` : ""}
+            {policy.mode_updated_at ? ` · ${timeAgo(policy.mode_updated_at)}` : ""}
           </p>
         )}
       </div>
@@ -318,6 +343,77 @@ function ModeBadge({ mode }: { mode?: string }) {
     >
       {isMonitor ? "monitor" : "enforce"}
     </span>
+  );
+}
+
+/**
+ * Same look as ModeBadge, but clickable for operator+ roles (CORE-10694):
+ * flips the agent's enforcement mode via a DB override without touching the
+ * agent_policies.json ConfigMap. Falls back to the static badge for viewers.
+ */
+function ModeToggle({
+  agentName,
+  mode,
+  overridden,
+  canEdit,
+  onChanged,
+}: {
+  agentName: string;
+  mode?: "enforce" | "monitor";
+  overridden?: boolean;
+  canEdit: boolean;
+  onChanged: (mode: "enforce" | "monitor") => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const isMonitor = mode === "monitor";
+
+  if (!canEdit) {
+    return <ModeBadge mode={mode} />;
+  }
+
+  async function toggle() {
+    if (pending) return;
+    const next = isMonitor ? "enforce" : "monitor";
+    setPending(true);
+    setError(null);
+    try {
+      await setAgentMode(agentName, next);
+      onChanged(next);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Failed to update mode");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <button
+      onClick={toggle}
+      disabled={pending}
+      title={
+        error ??
+        (isMonitor
+          ? "Shadow mode: verdicts recorded but actions are NOT blocked. Click to switch to enforce."
+          : "Enforce mode: denied actions are blocked. Click to switch to monitor (shadow).")
+      }
+      className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium border transition-colors disabled:opacity-60 ${
+        error
+          ? "border-red-500/30 bg-red-500/10 text-red-600"
+          : isMonitor
+          ? "border-sky-500/30 bg-sky-500/10 text-sky-700 hover:bg-sky-500/20"
+          : "border-zinc-300 bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+      }`}
+    >
+      {pending ? (
+        <Loader2 className="h-2.5 w-2.5 animate-spin" />
+      ) : (
+        <>
+          {isMonitor ? "monitor" : "enforce"}
+          {overridden && <span className="opacity-70">*</span>}
+        </>
+      )}
+    </button>
   );
 }
 
@@ -491,6 +587,8 @@ function AuditPanel({ audit }: { audit: PermissionAudit }) {
 }
 
 export default function GovernancePage() {
+  const { user } = useAuth();
+  const canEditMode = roleAtLeast(user?.role, "operator");
   const [policies, setPolicies] = useState<PolicyDoc | null>(null);
   const [audit, setAudit] = useState<PermissionAudit | null>(null);
   const [gateway, setGateway] = useState<GatewayReconcile | null>(null);
@@ -564,6 +662,7 @@ export default function GovernancePage() {
                 name={name}
                 policy={policy}
                 gateway={gatewayByAgent.get(name)}
+                canEditMode={canEditMode}
               />
             ))}
           </div>

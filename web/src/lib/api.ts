@@ -328,6 +328,10 @@ export interface AgentPolicy {
   default_effect?: string;
   /** "enforce" blocks denied actions; "monitor" (shadow) only records them. */
   mode?: "enforce" | "monitor";
+  /** True when `mode` came from a runtime override (admin UI), not the file. */
+  mode_overridden?: boolean;
+  mode_updated_by?: string;
+  mode_updated_at?: string;
   tools?: PolicyTool[];
   rules?: PolicyRule[];
   /** Gateway-only agents declare model access here instead of tools/rules. */
@@ -383,12 +387,21 @@ export interface PermissionAudit {
 // Fetch helper
 // ---------------------------------------------------------------------------
 
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function apiFetch<T>(
   path: string,
   init?: RequestInit
 ): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...init?.headers,
@@ -396,7 +409,14 @@ async function apiFetch<T>(
   });
 
   if (!res.ok) {
-    throw new Error(`API ${res.status}: ${res.statusText}`);
+    let message = res.statusText;
+    try {
+      const body = await res.json();
+      if (body?.error) message = body.error;
+    } catch {
+      // body wasn't JSON -- fall back to statusText
+    }
+    throw new ApiError(res.status, message);
   }
 
   return res.json() as Promise<T>;
@@ -585,6 +605,117 @@ export async function fetchInvestigation(id: string): Promise<InvestigateStatusR
 // ---------------------------------------------------------------------------
 // SSE helper
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Auth & admin (CORE-10694)
+// ---------------------------------------------------------------------------
+
+export type Role = "viewer" | "operator" | "admin";
+
+export interface AuthUser {
+  username: string;
+  role: Role;
+  auth?: "session" | "api_key";
+}
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  role: Role;
+  disabled: boolean;
+  created_at: string;
+}
+
+export interface ApiKey {
+  id: number;
+  name: string;
+  role: Role;
+  created_by?: string;
+  created_at: string;
+  last_used_at?: string | null;
+  disabled: boolean;
+}
+
+/** Returns null on 401 (not logged in) instead of throwing -- callers use
+ * this to decide whether to render the login page. */
+export async function fetchMe(): Promise<AuthUser | null> {
+  if (DEMO_MODE) return { username: "demo", role: "admin" };
+  try {
+    return await apiFetch<AuthUser>("/api/auth/me");
+  } catch {
+    return null;
+  }
+}
+
+export async function login(username: string, password: string): Promise<AuthUser> {
+  return apiFetch<AuthUser>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export async function logout(): Promise<void> {
+  await apiFetch<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
+}
+
+export async function fetchUsers(): Promise<{ users: AdminUser[] }> {
+  return apiFetch<{ users: AdminUser[] }>("/api/admin/users");
+}
+
+export async function createUser(input: {
+  username: string;
+  password: string;
+  role: Role;
+}): Promise<AdminUser> {
+  return apiFetch<AdminUser>("/api/admin/users", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateUser(
+  id: number,
+  patch: { role?: Role; disabled?: boolean; password?: string },
+): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(`/api/admin/users/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteUser(id: number): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(`/api/admin/users/${id}`, { method: "DELETE" });
+}
+
+export async function fetchApiKeys(): Promise<{ api_keys: ApiKey[] }> {
+  return apiFetch<{ api_keys: ApiKey[] }>("/api/admin/api-keys");
+}
+
+/** The raw `key` is only ever returned here, at creation time. */
+export async function createApiKey(input: {
+  name: string;
+  role: Role;
+}): Promise<ApiKey & { key: string }> {
+  return apiFetch<ApiKey & { key: string }>("/api/admin/api-keys", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteApiKey(id: number): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(`/api/admin/api-keys/${id}`, { method: "DELETE" });
+}
+
+/** Flip an agent's enforcement mode from the Governance UI (operator+). */
+export async function setAgentMode(
+  agentName: string,
+  mode: "enforce" | "monitor",
+): Promise<{ agent_name: string; mode: string }> {
+  return apiFetch<{ agent_name: string; mode: string }>(
+    `/api/policies/${encodeURIComponent(agentName)}/mode`,
+    { method: "PATCH", body: JSON.stringify({ mode }) },
+  );
+}
 
 export function subscribeEvents(
   onEvent: (event: AgentEvent) => void,
